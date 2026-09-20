@@ -1217,7 +1217,10 @@ function ManualReviewScreen({ emailId, setScreen, backTo, onClassifyOther, onCla
                   <div key={doc.type} className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
                     <div className="px-5 py-3.5 border-b border-[#F0EEE9] bg-[#FAFAF9] flex items-center justify-between">
                       <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF]">{doc.label}</div>
-                      <button className="text-[12px] text-[#2563EB] font-medium flex items-center gap-1">Open <Chevron size={11} /></button>
+                      <button
+                        onClick={() => window.alert(`${doc.label} preview for ${email.id}. Real attachment preview will be connected when the backend API is added.`)}
+                        className="text-[12px] text-[#2563EB] font-medium flex items-center gap-1"
+                      >Open <Chevron size={11} /></button>
                     </div>
                     <div className="px-5 py-4">
                       <div className="h-24 bg-[#F9F8F6] border border-dashed border-[#E8E6E1] rounded-lg flex flex-col items-center justify-center gap-1.5 mb-2">
@@ -1424,10 +1427,10 @@ function FinalDecisionScreen({ emailId, setScreen, setActiveNav, setVerifTab, on
 
 // ─── Resend ───────────────────────────────────────────────────────────────────
 
-function ResendScreen({ manualDecisions, setScreen, onSelectEmail }: {
-  manualDecisions: Map<string, ManualDecision>; setScreen: (s: Screen) => void; onSelectEmail: (id: string) => void
+function ResendScreen({ manualDecisions, resentEmails, setScreen, onSelectEmail, onResend }: {
+  manualDecisions: Map<string, ManualDecision>; resentEmails: Set<string>; setScreen: (s: Screen) => void; onSelectEmail: (id: string) => void; onResend: (id: string) => void
 }) {
-  const resendEmails = allEmails.filter(e => manualDecisions.get(e.id) === 'resend')
+  const resendEmails = allEmails.filter(e => manualDecisions.get(e.id) === 'resend' && !resentEmails.has(e.id))
   return (
     <div className="flex-1 overflow-y-auto">
       <TopBar title="Resend" subtitle="Emails requiring correction" />
@@ -1478,7 +1481,7 @@ function ResendScreen({ manualDecisions, setScreen, onSelectEmail }: {
                         className="text-[12.5px] text-[#6B7280] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3.5 py-1.5 rounded-lg font-medium">Open Email</button>
                       <button onClick={() => { onSelectEmail(email.id); setScreen('manual-review') }}
                         className="text-[12.5px] text-[#6B7280] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3.5 py-1.5 rounded-lg font-medium">View Documents</button>
-                      <button className="ml-auto flex items-center gap-2 bg-[#111827] hover:bg-[#374151] text-white text-[12.5px] font-medium px-4 py-1.5 rounded-lg transition-colors">
+                      <button onClick={() => onResend(email.id)} className="ml-auto flex items-center gap-2 bg-[#111827] hover:bg-[#374151] text-white text-[12.5px] font-medium px-4 py-1.5 rounded-lg transition-colors">
                         Resend
                         <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 6.5h8M7 3.5l3 3-3 3" stroke="white" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
                       </button>
@@ -1507,6 +1510,7 @@ export default function App() {
   const [verifiedEmails, setVerifiedEmails]     = useState<Set<string>>(new Set(INITIALLY_VERIFIED))
   const [readEmails, setReadEmails]             = useState<Set<string>>(new Set())
   const [manualDecisions, setManualDecisions]   = useState<Map<string, ManualDecision>>(new Map())
+  const [resentEmails, setResentEmails]           = useState<Set<string>>(new Set())
   const [reclassifications, setReclassifications] = useState<Map<string, { classification: Classification; classifyType?: string }>>(new Map())
 
   function handleSetScreen(s: Screen) {
@@ -1543,6 +1547,10 @@ export default function App() {
 
   function handleDecision(id: string, d: ManualDecision) {
     setManualDecisions(prev => new Map([...prev, [id, d]]))
+  }
+
+  function handleResend(id: string) {
+    setResentEmails(prev => new Set([...prev, id]))
   }
 
   function handleClassifyOther(id: string, category: string) {
@@ -1624,7 +1632,8 @@ export default function App() {
             setVerifTab={setVerifTab} onDecision={handleDecision} />
         )}
         {screen === 'resend' && (
-          <ResendScreen manualDecisions={manualDecisions} setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId} />
+          <ResendScreen manualDecisions={manualDecisions} resentEmails={resentEmails}
+            setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId} onResend={handleResend} />
         )}
       </main>
     </div>
