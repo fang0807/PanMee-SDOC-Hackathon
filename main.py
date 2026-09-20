@@ -1908,11 +1908,14 @@ def main():
 
 def run_score():
 
-    score_cli = (
-        BASE_DIR.parent
-        / "server"
-        / "score_cli.py"
-    )
+    score_cli = BASE_DIR / "server" / "score_cli.py"
+
+    if not score_cli.exists():
+        score_cli = (
+            BASE_DIR.parent
+            / "server"
+            / "score_cli.py"
+        )
 
     if not score_cli.exists():
         print(
