@@ -2,6 +2,7 @@
 from .engine import SemanticEngine
 from .schemas import ClassificationResult, ExtractionResult, FieldResult
 from .providers import SemanticProvider, MockProvider, OpenAICompatibleProvider
+from .review_queue import ReviewQueue, ReviewItem
 
 __all__ = [
     "SemanticEngine",
@@ -11,4 +12,6 @@ __all__ = [
     "SemanticProvider",
     "MockProvider",
     "OpenAICompatibleProvider",
+    "ReviewQueue",
+    "ReviewItem",
 ]
