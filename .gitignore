@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 tempCodeRunnerFile.py
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# Generated backend output
