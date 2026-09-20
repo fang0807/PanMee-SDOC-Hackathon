@@ -240,3 +240,44 @@ Submit a result for self-scoring with `inbox.submit(submission)` (HTTP only) or 
 2. **Stage 2 — Correctness:** field normalization, missing-value handling, validation.
 3. **Stage 3 — Realistic Documents:** PDF/Word/OCR/vision support, error handling, retries.
 4. **Stage 4 — Demonstrable UI:** build the three screens from the UI Specification section above (Inbox, Comparison Detail, Review Queue) as a presentation layer over the submission JSON — not a replacement for it.
+
+---
+### Further Development: Scanned Documents (OCR)
+Scanned, image-only PDFs have no text layer, so a plain text read returns nothing. This section records what is built (Layer 1) and what to build next, in order. Each layer works on its own; stop after any of them.
+
+#### Layer 1 — OCR as review evidence (implemented)
+| Item | Detail |
+| :--- | :--- |
+| **Trigger** | Any PDF page with no text layer, or an image attachment (`.png`, `.jpg`, `.tif`, `.bmp`). Nothing is tied to particular emails or values. |
+| **Reader** | Tesseract through `backend/ocr.py`, using the images embedded in the PDF (no poppler needed). |
+| **Decision** | The email becomes `NEEDS_REVIEW` with `review_reason: "unreadable"` (a value the submission contract already allows). OCR text never decides `OK` or `MISMATCH`, because OCR errors would look like real defects. |
+| **Evidence** | `backend/review_queue.json` (generated, git-ignored): per scanned email, the OCR text, the fields read from it, plausibility flags, and which fields the two OCR readings disagree on (informational only). |
+| **Plausibility checks** | `backend/ocr_checks.py`, on the 7 compared fields: field not found, junk characters in names, container count must start with a number, weight must be a number with an optional unit (and a dot before exactly three digits is flagged as a possible misread comma), and ports are compared with a vocabulary built at run time from ports that the SI and BL of a readable email both state identically. A close match is shown as a suggestion, for example `TUTICOFIN` → `TUTICORIN, INDIA`. |
+| **Setup** | Install Tesseract, then `pip install pytesseract pillow pypdf`. Optional environment variables: `TESSERACT_CMD` (full path if not on `PATH`), `OCR_LANG` (default `eng`), `OCR_TIMEOUT` (seconds per image, default 60). |
+| **If OCR is missing** | One warning is printed and scanned documents stay `unreadable`, exactly as before. The run never fails because of OCR. |
+
+Known limits: OCR accuracy has not been measured. Corrupt PDFs (no readable stream at all) stay `unreadable`. `booking` and `vessel` appear on the documents but are not among the 7 compared fields, so they are neither checked nor compared.
+
+#### Layer 2 — Record what reviewers decide (next)
+Today nothing records a reviewer's answer: `ReviewQueue` items only ever hold `PENDING`, the queue cannot be loaded back, and it is rebuilt on every run, so decisions stored inside it would be lost.
+- **Decision log:** a separate append-only file (for example `review_decisions.jsonl`) that survives reruns. One line per decision: email ID, field, OCR value, confirmed value, action (`confirm` / `override` / `escalate`, matching the Stage 4 worker actions), reviewer, time, and the flags shown at that moment.
+- **Queue changes:** add `ReviewQueue.load()` and a way to mark an item resolved, and feed the pending and resolved counts to `SemanticMetrics.record_review`.
+- **Reviewer entry point (pick one):** edit the file by hand; a small backend endpoint; or the Stage 4 Review Queue screen. `frontend/src/App.jsx` already shows "Review Required" but has no backend calls yet.
+
+#### Layer 3 — Study the decisions (after Layer 2 has data)
+Only about 1% of the sample inbox is scanned, so early numbers will be thin; do not tune anything on a handful of cases.
+- **Accuracy report:** how often the OCR value was confirmed, per field. This is the OCR accuracy figure that does not exist yet.
+- **Suggested rule updates, approved by a person:** ports a reviewer confirmed join the known-port vocabulary; repeated character mix-ups (`O`/`0`, `R`/`F`) become a correction or a flag. An `Override` comment (as in the Stage 4 spec) feeds the Normalizer's synonym list.
+- **Auto-accept only when the data supports it:** a field that is nearly always confirmed could later skip review. The threshold is decided from the report, not guessed.
+- **No silent self-changes:** the system proposes, a person approves. One wrong "learned" fix must not quietly corrupt later results.
+
+#### Later options for reading scans
+| Option | What it adds | Cost or risk |
+| :--- | :--- | :--- |
+| **Two independent readers must agree** | Accept a field automatically only if OCR and a second reader (LLM vision, or a second OCR pass with different settings) agree and the plausibility check passes. Disagreements go to review. | More code and cost. `semantic_layer/providers.py` sends text only, so an image-capable provider is needed first. |
+| **OCR image preparation** | Upscale, clean and choose a page mode suited to forms, before OCR. | Fewer errors at the source; helps every option here. Needs measurement. |
+| **Tesseract confidence gate** | Use per-word confidence to auto-accept clean scans. | Tesseract scores are not calibrated (a wrong digit can score high), so a threshold set on very few documents would be unreliable. |
+| **Wire in `semantic_layer`** | Rule-first LLM fallback, decision trace and metrics. It is not imported by `main.py` yet; its "confidence" is the LLM's own claim. | Needs wiring, error handling for provider failures (`RuntimeError` is not caught by the engine), and its own accuracy measurement. |
+| **Not recommended** | LLM-only review of noisy OCR text (may silently "fix" a wrong value into a plausible one); retraining Tesseract (needs hundreds of labelled samples). | Hard-to-spot errors; far more data than exists. |
+
+Before choosing among these, measure first: view the scan images, hand-transcribe the key fields for the scanned emails, and score Tesseract per field.

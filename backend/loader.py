@@ -4,6 +4,8 @@ import json
 import urllib.request
 from pathlib import Path
 
+from ocr import is_image_path, ocr_image_bytes, ocr_pdf_page
+
 
 class Inbox:
     def __init__(self, source):
@@ -51,7 +53,24 @@ class Inbox:
     def read_text(self, att_path, encoding="utf-8"):
         """Read an attachment as text, including PDF and Excel files."""
 
+        return self.read_document(att_path, encoding)["text"]
+
+    def read_document(self, att_path, encoding="utf-8"):
+        """Read an attachment and report how the text was obtained.
+
+        Returns {"text": str, "ocr": bool}. "ocr" is True when any part
+        of the text came from OCR (a scanned page or an image file), so
+        callers can treat it as less trustworthy than a real text layer.
+        """
+
         data = self.read_bytes(att_path)
+
+        # Image attachments (scans, photos)
+        if is_image_path(att_path):
+            return {
+                "text": ocr_image_bytes(data),
+                "ocr": True,
+            }
 
         # PDF
         if att_path.lower().endswith(".pdf"):
@@ -61,14 +80,25 @@ class Inbox:
             reader = PdfReader(BytesIO(data))
 
             pages = []
+            used_ocr = False
 
             for page in reader.pages:
                 text = page.extract_text()
 
+                if not text or not text.strip():
+                    # Scanned page: no text layer, so OCR its images
+                    text = ocr_pdf_page(page)
+
+                    if text:
+                        used_ocr = True
+
                 if text:
                     pages.append(text)
 
-            return "\n".join(pages)
+            return {
+                "text": "\n".join(pages),
+                "ocr": used_ocr,
+            }
 
         # Excel
         if att_path.lower().endswith((".xlsx", ".xlsm")):
@@ -95,10 +125,16 @@ class Inbox:
                     if values:
                         lines.append(" | ".join(values))
 
-            return "\n".join(lines)
+            return {
+                "text": "\n".join(lines),
+                "ocr": False,
+            }
 
         # Normal text files
-        return data.decode(encoding, errors="replace")
+        return {
+            "text": data.decode(encoding, errors="replace"),
+            "ocr": False,
+        }
 
     # -- submission ------------------------------------------------------
 

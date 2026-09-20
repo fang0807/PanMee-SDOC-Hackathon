@@ -10,6 +10,14 @@ from loader import Inbox
 from classifier import classify_email
 from extractor import extract_fields
 from comparator import compare_documents
+from ocr_checks import (
+    FIELDS as OCR_CHECKED_FIELDS,
+    agreed_port_values,
+    build_port_vocabulary,
+    check_fields,
+    flagged_fields,
+)
+from semantic_layer.review_queue import ReviewQueue
 
 
 # ============================================================
@@ -19,7 +27,14 @@ from comparator import compare_documents
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_PATH = BASE_DIR / "results.json"
 SUBMISSION_PATH = BASE_DIR / "submission.json"
+REVIEW_QUEUE_PATH = BASE_DIR / "review_queue.json"
 CURRENT_INBOX = None
+
+# Filled while emails are processed, used to build review_queue.json:
+# ports both documents agree on (trusted vocabulary) and the emails
+# whose attachments had to be read with OCR.
+PORT_VALUES = []
+OCR_CASES = []
 
 DRAFT_BL_REQUEST_RE = re.compile(
     r"send\s+the\s+draft\s+BL",
@@ -671,9 +686,11 @@ def read_attachment(
         # Other files
         # ----------------------------------------------------
 
-        text = inbox.read_text(
+        document = inbox.read_document(
             attachment
         )
+
+        text = document["text"]
 
         if text is None:
             return (
@@ -687,6 +704,14 @@ def read_attachment(
             return (
                 None,
                 "unreadable",
+            )
+
+        # Text that came from OCR is only evidence for a reviewer;
+        # it must never decide OK / MISMATCH.
+        if document["ocr"]:
+            return (
+                text,
+                "scanned",
             )
 
         return (
@@ -1496,6 +1521,108 @@ def normalize_comparison_result(
 # Process one email
 # ============================================================
 
+# ============================================================
+# OCR review evidence
+# ============================================================
+
+def record_ocr_case(
+    email_id,
+    documents,
+):
+    OCR_CASES.append(
+        {
+            "email_id": email_id,
+            "documents": documents,
+        }
+    )
+
+
+def extract_document_fields(text):
+    """Same extraction as process_email, for OCR text (evidence only)."""
+
+    try:
+        fields = extract_fields(text)
+    except Exception:
+        fields = {}
+
+    fields = normalise_extracted_fields(fields)
+
+    try:
+        fields = merge_extracted_fields(
+            fields,
+            fallback_extract_fields(text),
+        )
+    except Exception:
+        pass
+
+    return fields
+
+
+def build_review_queue():
+    """Write review_queue.json: OCR text and plausibility flags for
+    every email that was sent to review because it was scanned."""
+
+    vocabulary = build_port_vocabulary(PORT_VALUES)
+
+    queue = ReviewQueue(REVIEW_QUEUE_PATH)
+
+    for case in OCR_CASES:
+        documents = {}
+        parsed = {}
+        flagged = []
+
+        for role, text in case["documents"].items():
+            fields = extract_document_fields(text)
+            flags = check_fields(fields, vocabulary)
+
+            parsed[role] = fields
+
+            documents[role] = {
+                "ocr_text": text,
+                "fields": {
+                    name: fields[name]
+                    for name in OCR_CHECKED_FIELDS
+                    if name in fields
+                },
+                "flags": flags,
+            }
+
+            for name in flagged_fields(flags):
+                if name not in flagged:
+                    flagged.append(name)
+
+        details = {
+            "documents": documents,
+        }
+
+        # Informational only: where the two OCR readings disagree.
+        if "SI" in parsed and "BL" in parsed:
+            try:
+                mismatches, _ = compare_documents(
+                    parsed["SI"],
+                    parsed["BL"],
+                )
+
+                details["unverified_mismatches"] = [
+                    item["field"]
+                    for item in mismatches
+                ]
+            except Exception:
+                pass
+
+        queue.add_case(
+            case["email_id"],
+            "ocr_scan",
+            category="BL_COMPARISON",
+            fields=flagged,
+            details=details,
+        )
+
+    queue.save()
+
+    return queue
+
+
 def process_email(
     email
 ):
@@ -1624,6 +1751,32 @@ def process_email(
         )
     )
 
+    # Scanned (OCR-read) documents are never compared automatically:
+    # OCR errors would look like real defects. Keep the OCR text as
+    # evidence and send the email to a person.
+    if (
+        si_error == "scanned"
+        or bl_error == "scanned"
+    ):
+        record_ocr_case(
+            email_id,
+            {
+                role: text
+                for role, text, error in (
+                    ("SI", si_text, si_error),
+                    ("BL", bl_text, bl_error),
+                )
+                if error == "scanned"
+            },
+        )
+
+        return make_result(
+            email_id,
+            "BL_COMPARISON",
+            "NEEDS_REVIEW",
+            review_reason="unreadable",
+        )
+
     if (
         si_error == "unreadable"
         or bl_error == "unreadable"
@@ -1735,6 +1888,15 @@ def process_email(
         )
     )
 
+    # Ports both documents state identically become trusted
+    # vocabulary for checking OCR-read documents later.
+    PORT_VALUES.extend(
+        agreed_port_values(
+            si_fields,
+            bl_fields,
+        )
+    )
+
     # ========================================================
     # 8. Compare
     # ========================================================
@@ -1836,6 +1998,9 @@ def main():
         str(BASE_DIR)
     )
 
+    PORT_VALUES.clear()
+    OCR_CASES.clear()
+
     emails = (
         CURRENT_INBOX.emails()
     )
@@ -1902,6 +2067,22 @@ def main():
     print(
         f"Submission written to: {SUBMISSION_PATH}"
     )
+
+    # The review queue is extra evidence for reviewers; a problem
+    # here must never affect the submission above.
+    try:
+        queue = build_review_queue()
+
+        print(
+            f"Review queue written to: {REVIEW_QUEUE_PATH} "
+            f"({len(queue.items)} scanned emails)"
+        )
+
+    except Exception as exc:
+        print(
+            f"Review queue not written: {exc}",
+            file=sys.stderr,
+        )
 
     run_score()
 
