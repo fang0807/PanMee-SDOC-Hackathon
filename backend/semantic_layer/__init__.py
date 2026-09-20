@@ -3,6 +3,7 @@ from .engine import SemanticEngine
 from .schemas import ClassificationResult, ExtractionResult, FieldResult
 from .providers import SemanticProvider, MockProvider, OpenAICompatibleProvider
 from .review_queue import ReviewQueue, ReviewItem
+from .trace import DecisionTrace
 
 __all__ = [
     "SemanticEngine",
@@ -14,4 +15,5 @@ __all__ = [
     "OpenAICompatibleProvider",
     "ReviewQueue",
     "ReviewItem",
+    "DecisionTrace",
 ]
