@@ -66,6 +66,28 @@ def normalize_port(value):
 
 
 # ============================================================
+# Party normalization
+# ============================================================
+
+def normalize_party(value):
+
+    # SI spreadsheets give "NAME | ADDRESS; ..." while the BL often
+    # has only the name, so compare the name (first segment) only.
+
+    if value is None:
+        return None
+
+    value = str(value).split(
+        "|",
+        1,
+    )[0]
+
+    return normalize_text(
+        value
+    )
+
+
+# ============================================================
 # Weight normalization
 # ============================================================
 
@@ -150,6 +172,16 @@ def normalize_value(
     ]:
 
         return normalize_port(
+            value
+        )
+
+    if field in [
+        "shipper",
+        "consignee",
+        "notify_party",
+    ]:
+
+        return normalize_party(
             value
         )
 

@@ -67,7 +67,7 @@ def clean_value(value):
     return value
 
 
-def extract_line_value(text, patterns):
+def extract_line_value(text, patterns, validate=None):
     for pattern in patterns:
         match = re.search(
             pattern,
@@ -77,10 +77,17 @@ def extract_line_value(text, patterns):
 
         if match:
             value = clean_value(match.group(1))
-            if value:
+            if value and (validate is None or validate(value)):
                 return value
 
     return None
+
+
+def looks_like_weight(value):
+    # A weight starts with a number ("23,702 KG", "243588"). This rejects
+    # container IDs such as "GLBV3136502" that sit under a
+    # "GROSS WEIGHT (KG)" table header in PDF text.
+    return bool(re.match(r"^\d[\d,]*(?:\.\d+)?\s*(?:kgs?\b|$)", value.strip(), re.IGNORECASE))
 
 
 def extract_fields(text):
@@ -245,6 +252,10 @@ def extract_fields(text):
     fields["gross_weight"] = extract_line_value(
     text,
     [
+        # PDF totals line; tolerates stray glyphs before the colon,
+        # e.g. "TOTAL Gross Weight■■(KGS): 23,702 KG"
+        r"^\s*TOTAL\s+Gross\s+(?:Weight|Wt)[^:|\n]*[:|]\s*(.+)$",
+
         r"^\s*Gross Weight\s*(?:\(KG\))?\s*:\s*(.+)$",
         r"^\s*GROSS WEIGHT\s*:\s*(.+)$",
         r"^\s*Gross Wt\s*(?:\(kgs\))?\s*:\s*(.+)$",
@@ -264,7 +275,8 @@ def extract_fields(text):
         r"^\s*Gross Weight\s*(?:\(KG\))?\s*$\n\s*(.+)$",
         r"^\s*Gross Wt\s*(?:\(kgs\))?\s*$\n\s*(.+)$",
         r"^\s*Gross Weight毛重\s*(?:\(KGS\))?\s*$\n\s*(.+)$",
-    ]
+    ],
+    validate=looks_like_weight,
 )
     # Remove None values
     return {

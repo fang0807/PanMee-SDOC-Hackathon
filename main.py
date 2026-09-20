@@ -1,5 +1,7 @@
 import json
 import re
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -18,6 +20,17 @@ BASE_DIR = Path(__file__).resolve().parent
 RESULTS_PATH = BASE_DIR / "results.json"
 SUBMISSION_PATH = BASE_DIR / "submission.json"
 CURRENT_INBOX = None
+
+DRAFT_BL_REQUEST_RE = re.compile(
+    r"send\s+the\s+draft\s+BL",
+    re.IGNORECASE,
+)
+
+INTERNAL_NOTICE_RE = re.compile(
+    r"Reminder:\s*Please\s+submit\s+SI\s*&\s*AED\s+for\s+all\s+pending\s+shipments"
+    r"|list\s+of\s+outstanding\s+BL",
+    re.IGNORECASE,
+)
 
 
 # ============================================================
@@ -315,15 +328,27 @@ def read_docx_text(path):
 
             texts = []
 
-            for text_node in paragraph.findall(
-                ".//w:t",
-                namespace,
-            ):
+            # Walk the paragraph in document order so line breaks
+            # (<w:br/>) and tabs inside a cell are kept instead of
+            # gluing "TRADING" + "ON BEHALF" into "TRADINGON BEHALF".
+            for node in paragraph.iter():
 
-                if text_node.text:
-                    texts.append(
-                        text_node.text
-                    )
+                tag = node.tag.rsplit(
+                    "}",
+                    1,
+                )[-1]
+
+                if tag == "t":
+                    if node.text:
+                        texts.append(
+                            node.text
+                        )
+
+                elif tag in {"br", "cr"}:
+                    texts.append("\n")
+
+                elif tag == "tab":
+                    texts.append(" ")
 
             if texts:
                 paragraph_text = (
@@ -1479,6 +1504,40 @@ def process_email(
     )
 
     # ========================================================
+    # 0. "Please send the draft BL" requests
+    #
+    # Nothing is attached and nothing is asked to be compared, so
+    # this is a BL_COMPARISON that is OK, not a missing attachment.
+    # ========================================================
+
+    if (
+        not email.get("attachments")
+        and DRAFT_BL_REQUEST_RE.search(
+            email.get("body") or ""
+        )
+    ):
+        return make_result(
+            email_id,
+            "BL_COMPARISON",
+            "OK",
+        )
+
+    # ========================================================
+    # 0b. Automated internal notices (reminder blasts, outstanding
+    # lists). They mention SI / BL, so the classifier mistakes them
+    # for SI requests or invoice queries, but they are GENERAL.
+    # ========================================================
+
+    if INTERNAL_NOTICE_RE.search(
+        email.get("body") or ""
+    ):
+        return make_result(
+            email_id,
+            "GENERAL",
+            "OK",
+        )
+
+    # ========================================================
     # 1. Classification
     # ========================================================
 
@@ -1842,6 +1901,32 @@ def main():
 
     print(
         f"Submission written to: {SUBMISSION_PATH}"
+    )
+
+    run_score()
+
+
+def run_score():
+
+    score_cli = (
+        BASE_DIR.parent
+        / "server"
+        / "score_cli.py"
+    )
+
+    if not score_cli.exists():
+        print(
+            f"Skipping score: {score_cli} not found"
+        )
+        return
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(score_cli),
+            str(SUBMISSION_PATH),
+        ],
+        check=False,
     )
 
 
