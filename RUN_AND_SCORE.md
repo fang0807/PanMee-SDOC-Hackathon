@@ -15,6 +15,7 @@ pip install pypdf openpyxl    # readers for PDF and Excel attachments
 ## 2. Run the pipeline and get the score (everyday command)
 
 ```powershell
+cd backend
 $env:PYTHONIOENCODING = "utf-8"
 python main.py
 ```
