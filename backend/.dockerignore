@@ -1,7 +1,6 @@
 __pycache__/
 *.pyc
 inbox/
-attachments/
 data_v2/
 results.json
 submission.json

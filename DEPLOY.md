@@ -19,9 +19,20 @@ The system has two parts that talk over HTTP:
   python export_ui_data.py
   ```
 
-- **Live checks.** `POST /api/process` does not store anything. The website keeps the results of your live
-  checks in this browser's `localStorage`, so they survive a refresh but are private to that browser and
-  disappear if site data is cleared.
+- **Searching the sample emails.** `GET /api/emails/search?q=...` filters the same records by words in the
+  id, subject, sender, body or SI/BL values. Optional `status`, `category`, `limit`, `offset`, and `ids`
+  (a comma-separated list to search within, because the server keeps no resend queue). It reads the same
+  in-memory data, so it needs no database.
+- **The original SI and BL files.** The Manual Review Workspace shows them through
+  `GET /api/emails/{id}/attachments/{SI|BL}/file` (also `/text` and `/sheet`). They are read from
+  `backend/attachments/` (1.6 MB), which is copied into the Docker image, so keep it out of
+  `backend/.dockerignore`. Without it the deployed preview returns 404.
+- **Live checks.** `POST /api/process` takes only an SI and a BL (no email subject or message, and no
+  classification step) and does not store anything; the uploads are deleted after the check. The result is
+  shown on the Live check page with two choices: **Save to Verification** or **Run next test**. Saving keeps
+  only the result, in that browser's `localStorage` (latest 50): it then appears in Verification and Overview
+  there, but it is private to that browser, is lost if site data is cleared, and has no attachment preview
+  because the files are never kept. An unsaved result is gone after a refresh.
 - **Manual review decisions** (Match, Resend, Keep in review) are not saved and reset on refresh.
 
 ## Run locally

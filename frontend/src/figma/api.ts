@@ -33,6 +33,26 @@ export interface ApiResult {
   auto_reply?: ApiAutoReply
 }
 
+export type AttachmentRole = 'SI' | 'BL'
+
+// The SI / BL files a sample email came with. A role is absent when that
+// attachment is missing.
+export type ApiAttachments = Partial<Record<AttachmentRole, { filename: string; extension: string }>>
+
+export interface ApiAttachmentText {
+  filename: string
+  extension: string
+  text: string
+  ocr: boolean
+  unreadable: boolean
+}
+
+export interface ApiSheet {
+  name: string
+  rows: string[][]
+  truncated: boolean
+}
+
 // One sample-inbox email with its pipeline result (GET /api/emails).
 export interface ApiEmailRecord {
   id: string
@@ -47,12 +67,10 @@ export interface ApiEmailRecord {
   defectFields: string[]
   reviewReason: string | null
   fields: ApiField[]
+  attachments: ApiAttachments
 }
 
 export interface CheckRequest {
-  subject: string
-  body: string
-  sender: string
   si: File
   bl: File
 }
@@ -95,11 +113,51 @@ export async function fetchEmails(): Promise<ApiEmailRecord[]> {
   return response.json()
 }
 
+function attachmentUrl(emailId: string, role: AttachmentRole, part: string): string {
+  return `${API_URL}/api/emails/${encodeURIComponent(emailId)}/attachments/${role}/${part}`
+}
+
+// The original file: shown in the page by default, saved when download is true.
+export function attachmentFileUrl(emailId: string, role: AttachmentRole, download = false): string {
+  return attachmentUrl(emailId, role, 'file') + (download ? '?download=true' : '')
+}
+
+async function getAttachment(url: string): Promise<Response> {
+  let response: Response
+
+  try {
+    response = await fetch(url)
+  } catch {
+    throw new Error('Could not reach the server. Check your connection and try again.')
+  }
+
+  if (!response.ok) throw new Error(await errorMessage(response))
+
+  return response
+}
+
+// What the pipeline read from the file (OCR text for a scan).
+export async function fetchAttachmentText(emailId: string, role: AttachmentRole): Promise<ApiAttachmentText> {
+  return (await getAttachment(attachmentUrl(emailId, role, 'text'))).json()
+}
+
+// The cells of an Excel attachment, one table per sheet.
+export async function fetchAttachmentSheets(emailId: string, role: AttachmentRole): Promise<ApiSheet[]> {
+  return (await (await getAttachment(attachmentUrl(emailId, role, 'sheet'))).json()).sheets
+}
+
+// The original file as bytes (used to draw Word documents in the page).
+export async function fetchAttachmentBytes(emailId: string, role: AttachmentRole): Promise<ArrayBuffer> {
+  return (await getAttachment(attachmentFileUrl(emailId, role))).arrayBuffer()
+}
+
+// The original file as text (used for .txt attachments).
+export async function fetchAttachmentPlainText(emailId: string, role: AttachmentRole): Promise<string> {
+  return (await getAttachment(attachmentFileUrl(emailId, role))).text()
+}
+
 export async function checkDocuments(request: CheckRequest): Promise<ApiResult> {
   const form = new FormData()
-  form.append('subject', request.subject)
-  form.append('body', request.body)
-  form.append('sender', request.sender)
   form.append('si', request.si)
   form.append('bl', request.bl)
 

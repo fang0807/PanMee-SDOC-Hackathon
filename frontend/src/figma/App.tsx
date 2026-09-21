@@ -1,5 +1,20 @@
-import React, { createContext, useContext, useEffect, useState } from 'react'
-import { checkDocuments, fetchEmails, FIELD_LABELS, type ApiEmailRecord, type ApiResult, type ApiAutoReply } from './api'
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
+import {
+  attachmentFileUrl,
+  checkDocuments,
+  fetchAttachmentBytes,
+  fetchAttachmentPlainText,
+  fetchAttachmentSheets,
+  fetchAttachmentText,
+  fetchEmails,
+  FIELD_LABELS,
+  type ApiAttachments,
+  type ApiAutoReply,
+  type ApiEmailRecord,
+  type ApiResult,
+  type ApiSheet,
+  type AttachmentRole,
+} from './api'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -44,11 +59,14 @@ interface Email {
   body?: string
   fields: VerifField[]
   autoReply?: ApiAutoReply
+  // The SI / BL files of a sample email. Undefined for a saved live check,
+  // whose uploaded files are never kept.
+  attachments?: ApiAttachments
 }
 
 // ─── Email pool ───────────────────────────────────────────────────────────────
-// The emails come from the backend (GET /api/emails) plus any live checks saved
-// in this browser. Screens read them through useEmails().
+// The emails come from the backend (GET /api/emails) plus any live checks the
+// employee chose to save in this browser. Screens read them through useEmails().
 
 const EmailsContext = createContext<Email[]>([])
 
@@ -97,6 +115,44 @@ function getReviewReason(email: Email): string {
   if (email.classification === 'need-review') return 'Fail to Identify Type'
   if (email.docResult === 'review') return 'Fail to Compare SI and BL'
   return ''
+}
+
+// The system's own answer, in words a person can act on. It ignores manual
+// decisions on purpose: those are shown in their own banner.
+function getVerdict(email: Email): { title: string; detail: string; style: string } {
+  if (email.docResult === 'match') {
+    return {
+      title: 'MATCH',
+      detail: email.fields.length > 0
+        ? 'All 7 fields agree between the Shipping Instruction and the Bill of Lading. No action needed.'
+        : 'There are no documents to compare.',
+      style: 'bg-[#F0FDF4] border-[#BBF7D0] text-[#16A34A]',
+    }
+  }
+  if (email.docResult === 'mismatch') {
+    const names = email.fields.filter(f => f.result === 'mismatch').map(f => f.field)
+    return {
+      title: 'MISMATCH',
+      detail: `${names.length} field${names.length > 1 ? 's' : ''} differ between the Shipping Instruction and the Bill of Lading: ${names.join(', ')}.`,
+      style: 'bg-[#FEF2F2] border-[#FECACA] text-[#DC2626]',
+    }
+  }
+  return {
+    title: 'NEEDS REVIEW',
+    detail: email.reviewDetail ?? 'The system could not decide on its own. A person needs to check the documents.',
+    style: 'bg-[#FFFBEB] border-[#FDE68A] text-[#D97706]',
+  }
+}
+
+function VerdictBanner({ email }: { email: Email }) {
+  const verdict = getVerdict(email)
+  return (
+    <div role="status" aria-label={`System result: ${verdict.title}`} className={`mb-5 rounded-xl border px-7 py-5 ${verdict.style}`}>
+      <div className="text-[11px] font-semibold uppercase tracking-[0.08em] opacity-70 mb-1">System result</div>
+      <div className="text-[24px] font-bold tracking-[-0.02em] leading-tight">{verdict.title}</div>
+      <div className="text-[13px] mt-1 text-[#374151]">{verdict.detail}</div>
+    </div>
+  )
 }
 
 function getVerifSummary(email: Email): string {
@@ -882,6 +938,7 @@ function VerificationDetailScreen({ emailId, manualDecisions, setScreen, onFlagR
             Previously kept in Review — still requires human attention
           </div>
         )}
+        <VerdictBanner email={email} />
         <div className="bg-white border border-[#E8E6E1] rounded-xl px-7 py-6 mb-5 flex items-center gap-5">
           <div className={`w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0 ${
             disp === 'match' ? 'bg-[#F0FDF4] border border-[#BBF7D0]' :
@@ -933,6 +990,189 @@ function VerificationDetailScreen({ emailId, manualDecisions, setScreen, onFlagR
   )
 }
 
+// ─── Attachment preview ───────────────────────────────────────────────────────
+// Shows the SI / BL file exactly as it arrived (Original tab) and what the
+// pipeline read from it (Extracted text tab). Nothing has to be downloaded.
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'bmp'])
+
+const ATTACHMENT_CARDS: { role: AttachmentRole; label: string }[] = [
+  { role: 'SI', label: 'Shipping Instruction' },
+  { role: 'BL', label: 'Bill of Lading' },
+]
+
+// Loads something once per key and reports loading / error / value.
+function useLoaded<T>(key: string, load: () => Promise<T>) {
+  const [state, setState] = useState<{ key: string; value?: T; error?: string }>({ key: '' })
+
+  useEffect(() => {
+    let cancelled = false
+    load()
+      .then(value => { if (!cancelled) setState({ key, value }) })
+      .catch(err => { if (!cancelled) setState({ key, error: err instanceof Error ? err.message : 'Could not load the preview.' }) })
+    return () => { cancelled = true }
+    // `key` identifies the file, so `load` only needs to run when it changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+
+  const done = state.key === key
+  return { loading: !done, value: done ? state.value : undefined, error: done ? state.error : undefined }
+}
+
+function PreviewMessage({ children, tone = 'muted' }: { children: React.ReactNode; tone?: 'muted' | 'error' }) {
+  return (
+    <div className={`h-full min-h-[160px] flex items-center justify-center px-6 text-center text-[13px] ${tone === 'error' ? 'text-[#DC2626]' : 'text-[#9CA3AF]'}`}>
+      {children}
+    </div>
+  )
+}
+
+function TextOriginal({ emailId, role }: { emailId: string; role: AttachmentRole }) {
+  const { loading, value, error } = useLoaded(`${emailId}/${role}`, () => fetchAttachmentPlainText(emailId, role))
+  if (loading) return <PreviewMessage>Loading…</PreviewMessage>
+  if (error) return <PreviewMessage tone="error">{error}</PreviewMessage>
+  return <pre className="px-6 py-5 text-[12.5px] leading-[1.6] text-[#111827] font-mono whitespace-pre-wrap break-words">{value}</pre>
+}
+
+function SheetOriginal({ emailId, role }: { emailId: string; role: AttachmentRole }) {
+  const { loading, value, error } = useLoaded<ApiSheet[]>(`${emailId}/${role}`, () => fetchAttachmentSheets(emailId, role))
+  if (loading) return <PreviewMessage>Loading…</PreviewMessage>
+  if (error) return <PreviewMessage tone="error">{error}</PreviewMessage>
+  if (!value || value.length === 0) return <PreviewMessage>This Excel file has no sheets.</PreviewMessage>
+  return (
+    <div className="px-6 py-5 space-y-6">
+      {value.map(sheet => (
+        <div key={sheet.name}>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF] mb-2">Sheet · {sheet.name}</div>
+          {sheet.rows.length === 0
+            ? <div className="text-[12px] text-[#9CA3AF]">This sheet is empty.</div>
+            : (
+              <div className="overflow-x-auto border border-[#E8E6E1] rounded-lg">
+                <table className="text-[12px] text-[#374151] border-collapse w-full">
+                  <tbody>
+                    {sheet.rows.map((row, r) => (
+                      <tr key={r} className="border-b border-[#F0EEE9] last:border-b-0">
+                        {row.map((cell, c) => <td key={c} className="px-3 py-1.5 border-r border-[#F0EEE9] last:border-r-0 align-top whitespace-pre-wrap">{cell}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          {sheet.truncated && <div className="mt-2 text-[11.5px] text-[#9CA3AF]">Only the first rows are shown. Download the original to see the rest.</div>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DocxOriginal({ emailId, role }: { emailId: string; role: AttachmentRole }) {
+  const host = useRef<HTMLDivElement>(null)
+  const [status, setStatus] = useState<{ done: boolean; error?: string }>({ done: false })
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        // The renderer is only loaded when a Word file is opened.
+        const [bytes, { renderAsync }] = await Promise.all([fetchAttachmentBytes(emailId, role), import('docx-preview')])
+        if (cancelled || !host.current) return
+        host.current.innerHTML = ''
+        await renderAsync(bytes, host.current)
+        if (!cancelled) setStatus({ done: true })
+      } catch (err) {
+        if (!cancelled) setStatus({ done: true, error: err instanceof Error ? err.message : 'This Word file could not be displayed.' })
+      }
+    })()
+    return () => { cancelled = true }
+  }, [emailId, role])
+
+  return (
+    <>
+      {!status.done && <PreviewMessage>Loading…</PreviewMessage>}
+      {status.error && <PreviewMessage tone="error">{status.error} Try the Extracted text tab.</PreviewMessage>}
+      <div ref={host} className={status.error ? 'hidden' : ''} />
+    </>
+  )
+}
+
+function ExtractedText({ emailId, role }: { emailId: string; role: AttachmentRole }) {
+  const { loading, value, error } = useLoaded(`${emailId}/${role}`, () => fetchAttachmentText(emailId, role))
+  if (loading) return <PreviewMessage>Loading…</PreviewMessage>
+  if (error) return <PreviewMessage tone="error">{error}</PreviewMessage>
+  if (!value) return null
+  if (value.unreadable) return <PreviewMessage>The system could not read any text from this file.</PreviewMessage>
+  return (
+    <div className="px-6 py-5">
+      <div className="flex items-center gap-2 mb-3 text-[11.5px] text-[#9CA3AF]">
+        What the system read from this file
+        {value.ocr && <span className="px-2 py-0.5 rounded-full bg-[#FFFBEB] text-[#D97706] font-medium">Read with OCR — may contain errors</span>}
+      </div>
+      <pre className="text-[12.5px] leading-[1.6] text-[#111827] font-mono whitespace-pre-wrap break-words">{value.text}</pre>
+    </div>
+  )
+}
+
+function OriginalView({ emailId, role, extension }: { emailId: string; role: AttachmentRole; extension: string }) {
+  if (extension === 'pdf') {
+    return <iframe title={`${role} attachment`} src={attachmentFileUrl(emailId, role)} className="w-full h-full min-h-[60vh] border-0" />
+  }
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return <div className="p-6"><img alt={`${role} attachment`} src={attachmentFileUrl(emailId, role)} className="max-w-full mx-auto" /></div>
+  }
+  if (extension === 'txt') return <TextOriginal emailId={emailId} role={role} />
+  if (extension === 'xlsx' || extension === 'xlsm') return <SheetOriginal emailId={emailId} role={role} />
+  if (extension === 'docx') return <DocxOriginal emailId={emailId} role={role} />
+  return <PreviewMessage>This file type cannot be shown in the page. Use Download original, or the Extracted text tab.</PreviewMessage>
+}
+
+function AttachmentPreview({ emailId, role, label, file, onClose }: {
+  emailId: string; role: AttachmentRole; label: string
+  file: { filename: string; extension: string }; onClose: () => void
+}) {
+  const [tab, setTab] = useState<'original' | 'text'>('original')
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={`${label} preview`}
+        className="bg-white rounded-xl shadow-xl w-full max-w-[920px] h-[85vh] flex flex-col overflow-hidden"
+        onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-[#F0EEE9] flex items-center gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF]">{label}</div>
+            <div className="text-[13px] font-medium text-[#111827] truncate">{file.filename}</div>
+          </div>
+          <a href={attachmentFileUrl(emailId, role, true)}
+            className="text-[12px] text-[#2563EB] font-medium hover:underline flex-shrink-0">Download original</a>
+          <button onClick={onClose} autoFocus aria-label="Close preview"
+            className="w-7 h-7 rounded-md text-[#6B7280] hover:bg-[#F3F4F6] hover:text-[#111827] flex items-center justify-center flex-shrink-0">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+          </button>
+        </div>
+        <div className="px-6 border-b border-[#F0EEE9] flex gap-5">
+          {([['original', 'Original'], ['text', 'Extracted text']] as const).map(([id, name]) => (
+            <button key={id} onClick={() => setTab(id)}
+              className={`py-2.5 text-[12.5px] font-medium border-b-2 -mb-px transition-colors ${tab === id ? 'border-[#111827] text-[#111827]' : 'border-transparent text-[#9CA3AF] hover:text-[#374151]'}`}>
+              {name}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1 overflow-auto bg-white">
+          {tab === 'original'
+            ? <OriginalView emailId={emailId} role={role} extension={file.extension} />
+            : <ExtractedText emailId={emailId} role={role} />}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Manual Review Workspace ──────────────────────────────────────────────────
 
 type ClassifyStep = 'main' | 'pick-type' | 'other-category' | 'bl-action'
@@ -945,6 +1185,7 @@ function ManualReviewScreen({ emailId, setScreen, backTo, onClassifyOther, onCla
   const allEmails = useEmails()
   const [classifyStep, setClassifyStep] = useState<ClassifyStep>('main')
   const [selectedOtherCat, setSelectedOtherCat] = useState<string | null>(null)
+  const [previewRole, setPreviewRole] = useState<AttachmentRole | null>(null)
 
   const email = emailId ? allEmails.find(e => e.id === emailId) : null
   if (!email) return null
@@ -952,10 +1193,16 @@ function ManualReviewScreen({ emailId, setScreen, backTo, onClassifyOther, onCla
   const reason = getReviewReason(email)
   const problemFields = email.fields.filter(f => f.result !== 'match')
   const resolvedBackTo = backTo ?? (isClassifyReview ? 'inbox' : 'verification-detail')
+  const previewFile = previewRole ? email.attachments?.[previewRole] : undefined
 
   return (
     <div className="flex-1 overflow-y-auto">
       <TopBar title="Manual Review Workspace" subtitle={reason} />
+      {previewRole && previewFile && (
+        <AttachmentPreview key={previewRole} emailId={email.id} role={previewRole} file={previewFile}
+          label={ATTACHMENT_CARDS.find(c => c.role === previewRole)?.label ?? previewRole}
+          onClose={() => setPreviewRole(null)} />
+      )}
       <div className="px-8 py-7 max-w-[940px]">
         <BackBtn onClick={() => setScreen(resolvedBackTo)} label="Back" />
         <div className="mb-6 px-5 py-3.5 rounded-xl border bg-[#FFFBEB] border-[#FDE68A] flex items-center gap-3">
@@ -1006,24 +1253,34 @@ function ManualReviewScreen({ emailId, setScreen, backTo, onClassifyOther, onCla
                 </div>
               </div>
               <div className="space-y-4">
-                {[{ type: 'SI', label: 'Shipping Instruction' }, { type: 'BL', label: 'Bill of Lading' }].map(doc => (
-                  <div key={doc.type} className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-                    <div className="px-5 py-3.5 border-b border-[#F0EEE9] bg-[#FAFAF9] flex items-center justify-between">
-                      <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF]">{doc.label}</div>
-                      <button
-                        onClick={() => window.alert(`${doc.label} preview for ${email.id}. Real attachment preview will be connected when the backend API is added.`)}
-                        className="text-[12px] text-[#2563EB] font-medium flex items-center gap-1"
-                      >Open <Chevron size={11} /></button>
-                    </div>
-                    <div className="px-5 py-4">
-                      <div className="h-24 bg-[#F9F8F6] border border-dashed border-[#E8E6E1] rounded-lg flex flex-col items-center justify-center gap-1.5 mb-2">
-                        <div className="w-7 h-7 rounded-md bg-[#EFF6FF] flex items-center justify-center text-[10px] font-bold text-[#2563EB]">{doc.type}</div>
-                        <span className="text-[11px] text-[#9CA3AF]">Document Preview</span>
+                {ATTACHMENT_CARDS.map(doc => {
+                  const file = email.attachments?.[doc.role]
+                  const status = file
+                    ? `${file.filename} · ${file.extension.toUpperCase()}`
+                    : email.attachments === undefined
+                      ? 'Files are not kept for live checks'
+                      : `No ${doc.role} attachment in this email`
+                  return (
+                    <div key={doc.role} className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
+                      <div className="px-5 py-3.5 border-b border-[#F0EEE9] bg-[#FAFAF9] flex items-center justify-between">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF]">{doc.label}</div>
+                        {file && (
+                          <button onClick={() => setPreviewRole(doc.role)}
+                            className="text-[12px] text-[#2563EB] font-medium flex items-center gap-1"
+                          >Open <Chevron size={11} /></button>
+                        )}
                       </div>
-                      <div className="text-[11.5px] text-[#9CA3AF]">{doc.type}-{email.id.toUpperCase()} · PDF</div>
+                      <div className="px-5 py-4">
+                        <button disabled={!file} onClick={() => setPreviewRole(doc.role)}
+                          className={`w-full h-24 bg-[#F9F8F6] border border-dashed border-[#E8E6E1] rounded-lg flex flex-col items-center justify-center gap-1.5 mb-2 ${file ? 'hover:bg-[#F3F4F6] cursor-pointer' : 'cursor-default'}`}>
+                          <div className="w-7 h-7 rounded-md bg-[#EFF6FF] flex items-center justify-center text-[10px] font-bold text-[#2563EB]">{doc.role}</div>
+                          <span className="text-[11px] text-[#9CA3AF]">{file ? 'Click to view the original' : 'Nothing to show'}</span>
+                        </button>
+                        <div className="text-[11.5px] text-[#9CA3AF] truncate">{status}</div>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
             <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden mb-6">
@@ -1374,13 +1631,14 @@ function labelFields(fields: ApiResult['fields']): VerifField[] {
   return fields.map(f => ({ ...f, field: FIELD_LABELS[f.field] ?? f.field }))
 }
 
-// A live check result, shown as an SI + BL comparison email.
-function toEmail(result: ApiResult, subject: string, sender: string, body: string): Email {
+// A live check result in the shape the result components read. It stays on
+// the Live check page unless the employee chooses Save to Verification.
+function toEmail(result: ApiResult, subject: string, body: string): Email {
   return {
     id: result.email_id,
     subject,
-    senderName: sender || 'Live upload',
-    sender: sender || 'live upload',
+    senderName: 'Live upload',
+    sender: 'live upload',
     received: formatReceived(new Date()),
     docType: 'SI + BL',
     docResult: docResultFor(result.status),
@@ -1410,12 +1668,13 @@ function fromRecord(record: ApiEmailRecord): Email {
     classifyType: isBL ? 'BL Comparison' : CATEGORY_LABELS[record.category] ?? record.docType,
     body: record.body,
     fields: labelFields(record.fields),
+    attachments: record.attachments ?? {},
   }
 }
 
-// Live checks are kept in this browser's localStorage, so they survive a page
-// refresh without a database. They are private to this browser and are lost if
-// the user clears site data.
+// Live checks the employee chose to save are kept in this browser's
+// localStorage. There is no database: they are private to this browser and are
+// lost if the user clears site data. The uploaded files are never kept.
 const LIVE_STORAGE_KEY = 'smartdoc.liveChecks'
 const LIVE_STORAGE_LIMIT = 50
 
@@ -1429,12 +1688,14 @@ function loadLiveEmails(): Email[] {
   }
 }
 
-function saveLiveEmail(email: Email) {
+// Returns false when the browser refuses (storage full or blocked).
+function saveLiveEmail(email: Email): boolean {
   try {
     const saved = [email, ...loadLiveEmails()].slice(0, LIVE_STORAGE_LIMIT)
     window.localStorage.setItem(LIVE_STORAGE_KEY, JSON.stringify(saved))
+    return true
   } catch {
-    // Storage is full or blocked: the check still shows for this session.
+    return false
   }
 }
 
@@ -1452,35 +1713,41 @@ function FilePicker({ label, file, onChange }: { label: string; file: File | nul
   )
 }
 
-function LiveCheckScreen({ onResult }: { onResult: (email: Email) => void }) {
-  const [subject, setSubject] = useState('Please check SI and draft BL')
-  const [body, setBody] = useState('Attached are the SI and draft BL. Please check the details and confirm.')
-  const [sender, setSender] = useState('')
+// A check is shown here first. Nothing is kept unless the employee chooses
+// Save to Verification (browser only); Run next test starts over.
+function LiveCheckScreen({ onSave, onView }: {
+  onSave: (email: Email) => boolean
+  onView: (id: string, tab: VerifTab) => void
+}) {
   const [si, setSi] = useState<File | null>(null)
   const [bl, setBl] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
   const [slow, setSlow] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [result, setResult] = useState<Email | null>(null)
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  // Changing the key on the pickers clears their hidden file inputs too, so the
+  // same file can be chosen again for the next test.
+  const [resetKey, setResetKey] = useState(0)
 
   async function submit() {
     if (!si || !bl) return
     setLoading(true)
     setSlow(false)
     setError(null)
-    setNotice(null)
+    setResult(null)
+    setSaved(false)
+    setSaveError(null)
     // Free hosting sleeps when idle, so the first request can take a while.
     const timer = setTimeout(() => setSlow(true), 6000)
 
     try {
-      const result = await checkDocuments({ subject, body, sender, si, bl })
-
-      if (result.category !== 'BL_COMPARISON') {
-        const label = CATEGORY_LABELS[result.category] ?? result.category
-        setNotice(`The email text was classified as "${label}", so no SI/BL comparison was run. Describe the request as a document check in the subject or message and try again.`)
-      } else {
-        onResult(toEmail(result, subject || 'Live check', sender, body))
-      }
+      setResult(toEmail(
+        await checkDocuments({ si, bl }),
+        `${si.name} vs ${bl.name}`,
+        `Uploaded on the Live check page.\nShipping Instruction: ${si.name}\nBill of Lading: ${bl.name}`,
+      ))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.')
     } finally {
@@ -1490,32 +1757,38 @@ function LiveCheckScreen({ onResult }: { onResult: (email: Email) => void }) {
     }
   }
 
-  const inputCls = 'w-full bg-white border border-[#E5E7EB] focus:border-[#2563EB] focus:outline-none rounded-lg px-3.5 py-2.5 text-[13px] text-[#111827]'
+  function save() {
+    if (!result || saved) return
+    if (onSave(result)) {
+      setSaved(true)
+      setSaveError(null)
+    } else {
+      setSaveError('Could not save in this browser (storage is full or blocked). The result was not saved.')
+    }
+  }
+
+  function runNextTest() {
+    setSi(null)
+    setBl(null)
+    setError(null)
+    setResult(null)
+    setSaved(false)
+    setSaveError(null)
+    setResetKey(k => k + 1)
+  }
 
   return (
     <div className="flex-1 overflow-y-auto">
       <TopBar title="Live check" subtitle="Upload an SI and a BL" />
-      <div className="px-8 py-7 max-w-[720px]">
-        <p className="text-[13px] text-[#6B7280] leading-[1.6] mb-6">
-          Upload a Shipping Instruction and a Bill of Lading. The backend classifies the email and compares the two documents field by field.
+      <div className="px-8 py-7 max-w-[940px]">
+        <p className="text-[13px] text-[#6B7280] leading-[1.6] mb-6 max-w-[720px]">
+          Upload a Shipping Instruction and a Bill of Lading. The system compares the two documents field by field and tells you whether they match. Nothing is kept unless you choose Save to Verification, and the uploaded files are never kept.
         </p>
-        <div className="bg-white border border-[#E8E6E1] rounded-xl px-6 py-6 space-y-5">
+        <div className="bg-white border border-[#E8E6E1] rounded-xl px-6 py-6 space-y-5 max-w-[720px]">
           <div className="grid grid-cols-2 gap-4">
-            <FilePicker label="Shipping Instruction (SI)" file={si} onChange={setSi} />
-            <FilePicker label="Bill of Lading (BL)" file={bl} onChange={setBl} />
+            <FilePicker key={`si-${resetKey}`} label="Shipping Instruction (SI)" file={si} onChange={setSi} />
+            <FilePicker key={`bl-${resetKey}`} label="Bill of Lading (BL)" file={bl} onChange={setBl} />
           </div>
-          <label className="block">
-            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email subject</span>
-            <input className={inputCls} value={subject} onChange={e => setSubject(e.target.value)} />
-          </label>
-          <label className="block">
-            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Sender (optional)</span>
-            <input className={inputCls} value={sender} placeholder="name@company.com" onChange={e => setSender(e.target.value)} />
-          </label>
-          <label className="block">
-            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email message</span>
-            <textarea className={`${inputCls} min-h-[90px] resize-y`} value={body} onChange={e => setBody(e.target.value)} />
-          </label>
           <div className="flex items-center justify-between gap-4">
             <span className="text-[11.5px] text-[#9CA3AF]">Accepted: txt, pdf, docx, xlsx and images, up to 10 MB each.</span>
             <button onClick={submit} disabled={!si || !bl || loading}
@@ -1530,10 +1803,41 @@ function LiveCheckScreen({ onResult }: { onResult: (email: Email) => void }) {
           </div>
         )}
         {error && (
-          <div className="mt-4 px-5 py-3.5 rounded-xl border bg-[#FEF2F2] border-[#FECACA] text-[12.5px] text-[#DC2626]">{error}</div>
+          <div className="mt-4 px-5 py-3.5 rounded-xl border bg-[#FEF2F2] border-[#FECACA] text-[12.5px] text-[#DC2626] max-w-[720px]">{error}</div>
         )}
-        {notice && (
-          <div className="mt-4 px-5 py-3.5 rounded-xl border bg-[#FFFBEB] border-[#FDE68A] text-[12.5px] text-[#D97706]">{notice}</div>
+        {result && (
+          <div className="mt-7">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#9CA3AF] mb-2">Checked · {result.subject}</div>
+            <VerdictBanner email={result} />
+            <div className="flex flex-wrap items-center gap-3">
+              {saved ? (
+                <>
+                  <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-[#16A34A]">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7.5l2.5 2.5L11 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    Saved to Verification
+                  </span>
+                  <button onClick={() => onView(result.id, result.docResult)}
+                    className="text-[13px] text-[#2563EB] font-medium hover:underline">View in Verification</button>
+                </>
+              ) : (
+                <button onClick={save}
+                  className="bg-[#111827] hover:bg-[#374151] text-white text-[13px] font-medium px-5 py-2.5 rounded-lg transition-colors">
+                  Save to Verification
+                </button>
+              )}
+              <button onClick={runNextTest}
+                className="text-[13px] font-medium text-[#374151] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-5 py-2.5 rounded-lg transition-colors">
+                Run next test
+              </button>
+            </div>
+            {saveError && <div className="mt-3 text-[12px] text-[#DC2626]">{saveError}</div>}
+            <p className="mt-3 mb-6 text-[11.5px] text-[#9CA3AF]">
+              {saved
+                ? 'Saved in this browser only. The uploaded files are not kept.'
+                : 'Not saved yet. Save to Verification keeps this result in this browser only; the uploaded files are never kept.'}
+            </p>
+            {result.fields.length > 0 && <FieldDetailTable fields={result.fields} />}
+          </div>
         )}
       </div>
     </div>
@@ -1568,15 +1872,19 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
     else if (s === 'live-check') setActiveNav('live')
   }
 
-  // Live results are added to the email list and saved in this browser, then
-  // opened like any other verified email.
-  function handleLiveResult(email: Email) {
-    saveLiveEmail(email)
+  // A live check the employee chose to save: kept in this browser, then listed
+  // like any other verified email. Returns false if the browser refused.
+  function handleSaveLive(email: Email): boolean {
+    if (!saveLiveEmail(email)) return false
     setAllEmails(prev => [email, ...prev])
     setClassifiedEmails(prev => new Set([...prev, email.id]))
     setVerifiedEmails(prev => new Set([...prev, email.id]))
-    setSelectedEmailId(email.id)
-    setVerifTab(email.docResult)
+    return true
+  }
+
+  function handleViewSaved(id: string, tab: VerifTab) {
+    setSelectedEmailId(id)
+    setVerifTab(tab)
     setActiveNav('verification')
     setScreen('verification-detail')
   }
@@ -1696,7 +2004,7 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
           <ResendScreen manualDecisions={manualDecisions} resentEmails={resentEmails}
             setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId} onResend={handleResend} />
         )}
-        {screen === 'live-check' && <LiveCheckScreen onResult={handleLiveResult} />}
+        {screen === 'live-check' && <LiveCheckScreen onSave={handleSaveLive} onView={handleViewSaved} />}
       </main>
     </div>
     </EmailsContext.Provider>

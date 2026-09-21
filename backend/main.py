@@ -1698,6 +1698,28 @@ def process_email(
             "OK",
         )
 
+    return compare_attachments(
+        email,
+        detail,
+    )
+
+
+def compare_attachments(
+    email,
+    detail=None,
+):
+    """Steps 2 onward: read the SI and the BL and compare them.
+
+    process_email runs this for emails classified as BL_COMPARISON.
+    The live-check API calls it directly, because an SI and a BL that
+    someone uploads are a document check by definition, so no email
+    text has to be classified first.
+    """
+
+    email_id = email.get(
+        "email_id"
+    )
+
     # ========================================================
     # 2. Attachments
     # ========================================================
