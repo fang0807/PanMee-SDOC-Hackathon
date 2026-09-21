@@ -1,0 +1,13 @@
+{
+  "email": {
+    "email_id": "demo_match_001",
+    "from": "client@example.com",
+    "subject": "SI submission for ABC123"
+  },
+  "verification": {
+    "email_id": "demo_match_001",
+    "category": "BL_COMPARISON",
+    "status": "OK",
+    "defect_fields": []
+  }
+}

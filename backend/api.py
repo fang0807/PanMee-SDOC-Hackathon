@@ -24,6 +24,7 @@ from openpyxl import load_workbook
 import main as pipeline
 from loader import Inbox
 from ui_records import build_fields
+from autoreply_bridge import handle_verification_autoreply
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -107,7 +108,10 @@ app.add_middleware(
         origin.strip()
         for origin in os.getenv(
             "ALLOWED_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173",
+            (
+                "http://localhost:5173,http://127.0.0.1:5173,"
+                "http://localhost:5174,http://127.0.0.1:5174"
+            ),
         ).split(",")
         if origin.strip()
     ],
@@ -407,15 +411,36 @@ async def process(
             "attachments": attachments,
         }
 
+        # IMPORTANT: verification must run first so `result` exists
+        # before the standalone Auto Reply plugin is called.
         result, detail = await run_in_threadpool(
             run_pipeline,
             email,
             workdir,
         )
 
+        # Auto Reply is intentionally non-blocking for verification.
+        # If SMTP/plugin configuration fails, users still receive the
+        # document-comparison result instead of a 500 response.
+        try:
+            auto_reply = await run_in_threadpool(
+                handle_verification_autoreply,
+                email,
+                result,
+            )
+        except Exception as exc:
+            auto_reply = {
+                "ok": False,
+                "email_id": result.get("email_id") or email_id,
+                "status": result.get("status"),
+                "action": "ERROR",
+                "reason": f"Auto Reply failed: {type(exc).__name__}: {exc}",
+            }
+
         return {
             **result,
             "fields": build_fields(result, detail),
+            "auto_reply": auto_reply,
         }
 
     finally:

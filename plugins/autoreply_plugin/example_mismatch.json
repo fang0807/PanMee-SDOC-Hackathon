@@ -1,0 +1,16 @@
+{
+  "email": {
+    "email_id": "demo_mismatch_001",
+    "from": "client@example.com",
+    "subject": "SI submission for XYZ789"
+  },
+  "verification": {
+    "email_id": "demo_mismatch_001",
+    "category": "BL_COMPARISON",
+    "status": "MISMATCH",
+    "defect_fields": [
+      "port_of_discharge",
+      "gross_weight_kg"
+    ]
+  }
+}

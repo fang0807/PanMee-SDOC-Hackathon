@@ -12,3 +12,4 @@ backend/review_queue.json
 # Local env files (frontend/.env.example is committed)
 frontend/.env
 frontend/.env.local
+plugins/autoreply_plugin/runtime/

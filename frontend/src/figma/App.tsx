@@ -9,6 +9,7 @@ import {
   fetchEmails,
   FIELD_LABELS,
   type ApiAttachments,
+  type ApiAutoReply,
   type ApiEmailRecord,
   type ApiResult,
   type ApiSheet,
@@ -60,6 +61,7 @@ interface Email {
   // The SI / BL files of a sample email. Undefined for a saved live check,
   // whose uploaded files are never kept.
   attachments?: ApiAttachments
+  autoReply?: ApiAutoReply
 }
 
 // ─── Email pool ───────────────────────────────────────────────────────────────
@@ -1476,6 +1478,49 @@ function FinalDecisionScreen({ emailId, setScreen, setActiveNav, setVerifTab, on
 
 // ─── Resend ───────────────────────────────────────────────────────────────────
 
+function fallbackResendDraft(email: Email) {
+  const mismatches = email.fields.filter(f => f.result === 'mismatch')
+  const issueLines = mismatches.length > 0
+    ? mismatches.map(f => `- ${f.field}: SI = ${f.si || '(blank)'}; BL = ${f.bl || '(blank)'}`).join('\n')
+    : '- Please review the SI and draft BL details.'
+
+  return {
+    recipient: email.sender,
+    subject: email.subject.toLowerCase().startsWith('re:') ? email.subject : `Re: ${email.subject}`,
+    body: [
+      'Dear Client,',
+      '',
+      'Thank you for your submission. During verification, we identified differences that require your attention.',
+      '',
+      'The following item(s) do not match between the SI and the draft BL:',
+      issueLines,
+      '',
+      'Please review the information and provide the corrected details or documents.',
+      '',
+      'Best regards,',
+      'SmartDoc Verification Team',
+    ].join('\n'),
+  }
+}
+
+function gmailComposeUrl(email: Email): string {
+  const backendDraft = email.autoReply?.action === 'REVIEW_REQUIRED' ? email.autoReply : undefined
+  const fallback = fallbackResendDraft(email)
+  const recipient = backendDraft?.recipient || fallback.recipient
+  const subject = backendDraft?.subject || fallback.subject
+  const body = backendDraft?.body || fallback.body
+
+  const params = new URLSearchParams({
+    view: 'cm',
+    fs: '1',
+    to: recipient,
+    su: subject,
+    body,
+  })
+
+  return `https://mail.google.com/mail/?${params.toString()}`
+}
+
 function ResendScreen({ manualDecisions, resentEmails, setScreen, onSelectEmail, onResend }: {
   manualDecisions: Map<string, ManualDecision>; resentEmails: Set<string>; setScreen: (s: Screen) => void; onSelectEmail: (id: string) => void; onResend: (id: string) => void
 }) {
@@ -1531,7 +1576,10 @@ function ResendScreen({ manualDecisions, resentEmails, setScreen, onSelectEmail,
                         className="text-[12.5px] text-[#6B7280] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3.5 py-1.5 rounded-lg font-medium">Open Email</button>
                       <button onClick={() => { onSelectEmail(email.id); setScreen('manual-review') }}
                         className="text-[12.5px] text-[#6B7280] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3.5 py-1.5 rounded-lg font-medium">View Documents</button>
-                      <button onClick={() => onResend(email.id)} className="ml-auto flex items-center gap-2 bg-[#111827] hover:bg-[#374151] text-white text-[12.5px] font-medium px-4 py-1.5 rounded-lg transition-colors">
+                      <button onClick={() => {
+                        window.open(gmailComposeUrl(email), '_blank', 'noopener,noreferrer')
+                        onResend(email.id)
+                      }} className="ml-auto flex items-center gap-2 bg-[#111827] hover:bg-[#374151] text-white text-[12.5px] font-medium px-4 py-1.5 rounded-lg transition-colors">
                         Resend
                         <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M2 6.5h8M7 3.5l3 3-3 3" stroke="white" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
                       </button>
@@ -1599,6 +1647,7 @@ function toEmail(result: ApiResult, subject: string, body: string): Email {
     classifyType: 'BL Comparison',
     body,
     fields: labelFields(result.fields),
+    autoReply: result.auto_reply,
   }
 }
 
