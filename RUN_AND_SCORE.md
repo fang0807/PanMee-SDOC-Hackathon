@@ -1,3 +1,28 @@
+# Run the web app locally
+
+**Terminal 1: backend (API on port 8000)**
+
+```powershell
+cd backend
+pip install -r requirements.txt
+python -m uvicorn api:app --port 8000
+```
+
+To check that it's up, open http://localhost:8000/health. It should return `{"status":"ok"}`.
+
+**Terminal 2: frontend (web app)**
+
+```powershell
+cd frontend
+npm install
+copy .env.example .env.local
+npm run dev
+```
+
+Then open the URL it prints, usually http://localhost:5173. See `DEPLOY.md` for putting it online.
+
+---
+
 # Run the pipeline and get the final score
 
 All commands are for **PowerShell** (the default terminal in VS Code on Windows).

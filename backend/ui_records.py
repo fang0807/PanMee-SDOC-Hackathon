@@ -3,8 +3,12 @@
 Shared by api.py (live checks) and export_ui_data.py (the 520 inbox emails).
 """
 
+import re
+from pathlib import Path
+
 import main as pipeline
 
+ATTACHMENT_NAME = re.compile(r"_(SI|BL)\.([A-Za-z0-9]+)$")
 
 # Internal field names, in the order the UI lists them. gross_weight is
 # reported as gross_weight_kg in the submission (see convert_field_name).
@@ -85,6 +89,28 @@ def doc_type(email, result):
     return DOC_TYPES.get(result["category"], "General")
 
 
+def attachment_summary(email):
+    """{"SI": {"filename", "extension"}, "BL": {...}} for the files it has.
+
+    The web UI uses this to label the preview and to say when an SI or BL
+    attachment is missing. Files are named {email_id}_{SI|BL}.{extension}.
+    """
+
+    summary = {}
+
+    for attachment in email.get("attachments") or []:
+        name = Path(pipeline.attachment_name(attachment)).name
+        match = ATTACHMENT_NAME.search(name)
+
+        if match:
+            summary[match.group(1)] = {
+                "filename": name,
+                "extension": match.group(2).lower(),
+            }
+
+    return summary
+
+
 def make_ui_record(email, result, detail):
     """One inbox email plus its pipeline result, as the UI needs it."""
 
@@ -102,4 +128,5 @@ def make_ui_record(email, result, detail):
         "defectFields": result["defect_fields"],
         "reviewReason": result["review_reason"],
         "fields": build_fields(result, detail),
+        "attachments": attachment_summary(email),
     }
