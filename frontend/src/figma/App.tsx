@@ -1,5 +1,5 @@
-import React, { useState } from 'react'
-import { checkDocuments, FIELD_LABELS, type ApiResult } from './api'
+import React, { createContext, useContext, useEffect, useState } from 'react'
+import { checkDocuments, fetchEmails, FIELD_LABELS, type ApiEmailRecord, type ApiResult } from './api'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,235 +41,19 @@ interface Email {
   reviewDetail?: string
   classification: Classification
   classifyType?: string
+  body?: string
   fields: VerifField[]
 }
 
 // ─── Email pool ───────────────────────────────────────────────────────────────
+// The emails come from the backend (GET /api/emails) plus any live checks saved
+// in this browser. Screens read them through useEmails().
 
-const allEmails: Email[] = [
-  {
-    id: 'email_001',
-    subject: 'Shipping Instruction + BL — Ref. CSC-2024-3310',
-    senderName: 'COSCO Shipping',
-    sender: 'trade@cosco-shipping.com',
-    received: 'Today, 12:30 PM',
-    docType: 'SI + BL',
-    docResult: 'review',
-    reviewDetail: 'Unable to identify Shipper — BL field is partially corrupted',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'COSCO Excellence Corp.', bl: 'Unable to identify', result: 'review', reason: 'The BL document is partially corrupted — shipper field is unreadable.' },
-      { field: 'Consignee', si: 'Nordic Cargo AB', bl: 'Nordic Cargo AB', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Nordic Cargo AB', bl: 'Nordic Cargo AB', result: 'match', reason: '' },
-      { field: 'Port of Loading', si: 'Tianjin, China (CNTXG)', bl: 'Tianjin, China (CNTXG)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Gothenburg, Sweden (SEGOT)', bl: 'Gothenburg, Sweden (SEGOT)', result: 'match', reason: '' },
-      { field: 'Container Count', si: '2 × 20GP', bl: '2 × 20GP', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '14,200 kg', bl: '14,200 kg', result: 'match', reason: '' },
-    ],
-  },
-  {
-    id: 'email_002',
-    subject: 'SI & BL Documents — Pacific Import PO #44821',
-    senderName: 'Pacific Imports Pte.',
-    sender: 'logistics@pacific-imports.sg',
-    received: 'Today, 10:05 AM',
-    docType: 'SI + BL',
-    docResult: 'match',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Pacific Imports Pte. Ltd.', bl: 'Pacific Imports Pte. Ltd.', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Euro Trade GmbH', bl: 'Euro Trade GmbH', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Euro Trade GmbH', bl: 'Euro Trade GmbH', result: 'match', reason: '' },
-      { field: 'Port of Loading', si: 'Singapore (SGSIN)', bl: 'Singapore (SGSIN)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Hamburg, Germany (DEHAM)', bl: 'Hamburg, Germany (DEHAM)', result: 'match', reason: '' },
-      { field: 'Container Count', si: '1 × 40HC', bl: '1 × 40HC', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '22,800 kg', bl: '22,800 kg', result: 'match', reason: '' },
-    ],
-  },
-  {
-    id: 'email_003',
-    subject: 'BL Submission — Hapag Export HLL-0228',
-    senderName: 'Hapag-Lloyd AG',
-    sender: 'export@hapag-lloyd.com',
-    received: 'Today, 08:47 AM',
-    docType: 'SI + BL',
-    docResult: 'mismatch',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Hapag Logistics GmbH', bl: 'Hapag Logistics GmbH', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Orient Pacific Co. Ltd.', bl: 'Orient Pacific Co. Ltd.', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Orient Pacific Co. Ltd.', bl: 'Orient Pacific Co. Ltd.', result: 'match', reason: '' },
-      { field: 'Port of Loading', si: 'Hamburg, Germany (DEHAM)', bl: 'Hamburg, Germany (DEHAM)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Dubai, UAE (AEDXB)', bl: 'Abu Dhabi, UAE (AEAUH)', result: 'mismatch', reason: 'Port of discharge differs — SI states Dubai (AEDXB) but BL states Abu Dhabi (AEAUH). Carrier confirmation required.' },
-      { field: 'Container Count', si: '3 × 40HC', bl: '3 × 40HC', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '9,600 kg', bl: '9,600 kg', result: 'match', reason: '' },
-    ],
-  },
-  {
-    id: 'email_010',
-    subject: 'Invoice #INV-2024-8821 — Pacific Logistics',
-    senderName: 'Pacific Logistics Ltd.',
-    sender: 'billing@pacific-logistics.sg',
-    received: 'Today, 11:22 AM',
-    docType: 'Invoice',
-    docResult: 'match',
-    classification: 'ignore',
-    classifyType: 'Invoice Query',
-    fields: [],
-  },
-  {
-    id: 'email_011',
-    subject: 'RE: Updated Shipping Terms & Conditions',
-    senderName: 'OOCL Trade Team',
-    sender: 'trade@oocl.com',
-    received: 'Today, 09:55 AM',
-    docType: 'General',
-    docResult: 'match',
-    classification: 'ignore',
-    classifyType: 'General',
-    fields: [],
-  },
-  {
-    id: 'email_012',
-    subject: 'Fwd: Documents for Your Reference',
-    senderName: 'info@unknown-sender.net',
-    sender: 'info@unknown-sender.net',
-    received: 'Today, 07:30 AM',
-    docType: 'Unknown',
-    docResult: 'review',
-    classification: 'need-review',
-    classifyType: 'Unknown',
-    fields: [],
-  },
-  {
-    id: 'email_004',
-    subject: 'Shipping Instruction — MAERSK #4821',
-    senderName: 'Maersk Trading Co.',
-    sender: 'ops@maersktrading.com',
-    received: '18 Nov, 10:42 AM',
-    docType: 'SI + BL',
-    docResult: 'match',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Maersk Trading Co. Ltd.', bl: 'Maersk Trading Co. Ltd.', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Pacific Imports Pte. Ltd.', bl: 'Pacific Imports Pte. Ltd.', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Pacific Imports Pte. Ltd.', bl: 'Pacific Imports Pte. Ltd.', result: 'match', reason: '' },
-      { field: 'Port of Loading', si: 'Shanghai, China (CNSHA)', bl: 'Shanghai, China (CNSHA)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Singapore (SGSIN)', bl: 'Singapore (SGSIN)', result: 'match', reason: '' },
-      { field: 'Container Count', si: '3 × 40HC', bl: '3 × 40HC', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '18,240 kg', bl: '18,240 kg', result: 'match', reason: '' },
-    ],
-  },
-  {
-    id: 'email_005',
-    subject: 'Bill of Lading — MSC #9281',
-    senderName: 'MSC Shipping',
-    sender: 'trade@mscshipping.com',
-    received: '18 Nov, 09:31 AM',
-    docType: 'SI + BL',
-    docResult: 'review',
-    reviewDetail: 'Unable to identify Notify Party — field missing or illegible on BL',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Global Freight Solutions Ltd.', bl: 'Global Freight Solutions Ltd.', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Oceanic Distribution Pte.', bl: 'Oceanic Distribution Pte.', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Oceanic Distribution Pte.', bl: 'Unable to identify', result: 'review', reason: 'The notify party field on the BL is missing or illegible. Human verification is required.' },
-      { field: 'Port of Loading', si: 'Busan, South Korea (KRPUS)', bl: 'Busan, South Korea (KRPUS)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Rotterdam, Netherlands (NLRTM)', bl: 'Rotterdam, Netherlands (NLRTM)', result: 'match', reason: '' },
-      { field: 'Container Count', si: '2 × 40HC', bl: '2 × 40HC', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '24,500 kg', bl: '24,500 kg', result: 'match', reason: '' },
-    ],
-  },
-  {
-    id: 'email_006',
-    subject: 'Shipping Instruction — CMA CGM #4819',
-    senderName: 'CMA CGM',
-    sender: 'docs@cma-cgm.com',
-    received: '17 Nov, 08:56 AM',
-    docType: 'SI + BL',
-    docResult: 'match',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Asia Pacific Exports Co.', bl: 'Asia Pacific Exports Co.', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Euro Trade Importers GmbH', bl: 'Euro Trade Importers GmbH', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Euro Trade Importers GmbH', bl: 'Euro Trade Importers GmbH', result: 'match', reason: '' },
-      { field: 'Port of Loading', si: 'Guangzhou, China (CNGZH)', bl: 'Guangzhou, China (CNGZH)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Hamburg, Germany (DEHAM)', bl: 'Hamburg, Germany (DEHAM)', result: 'match', reason: '' },
-      { field: 'Container Count', si: '4 × 20GP', bl: '4 × 20GP', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '31,200 kg', bl: '31,200 kg', result: 'match', reason: '' },
-    ],
-  },
-  {
-    id: 'email_007',
-    subject: 'Bill of Lading — COSCO #3310',
-    senderName: 'COSCO Freight',
-    sender: 'docs@cosco-freight.com',
-    received: '17 Nov, 08:12 AM',
-    docType: 'SI + BL',
-    docResult: 'mismatch',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Sunrise Industrial Corp.', bl: 'Sunrise Industrial Corp.', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Nordic Cargo AB', bl: 'Nordic Cargo AB', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Nordic Cargo AB', bl: 'Nordic Cargo AB', result: 'match', reason: '' },
-      { field: 'Port of Loading', si: 'Tianjin, China (CNTXG)', bl: 'Tianjin, China (CNTXG)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Gothenburg, Sweden (SEGOT)', bl: 'Gothenburg, Sweden (SEGOT)', result: 'match', reason: '' },
-      { field: 'Container Count', si: '2 × 20GP', bl: '2 × 20GP', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '12,500 kg', bl: '13,200 kg', result: 'mismatch', reason: 'Gross weight differs by 700 kg (+5.6%). The BL declares 13,200 kg against the SI\'s 12,500 kg.' },
-    ],
-  },
-  {
-    id: 'email_008',
-    subject: 'SI + BL — Evergreen #7741',
-    senderName: 'Evergreen Marine',
-    sender: 'docs@evergreen-marine.tw',
-    received: '16 Nov',
-    docType: 'SI + BL',
-    docResult: 'match',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Jade Commodities Ltd.', bl: 'Jade Commodities Ltd.', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Delta Trade LLC', bl: 'Delta Trade LLC', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Delta Trade LLC', bl: 'Delta Trade LLC', result: 'match', reason: '' },
-      { field: 'Port of Loading', si: 'Kaohsiung, Taiwan (TWKHH)', bl: 'Kaohsiung, Taiwan (TWKHH)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Los Angeles, USA (USLAX)', bl: 'Los Angeles, USA (USLAX)', result: 'match', reason: '' },
-      { field: 'Container Count', si: '2 × 40HC', bl: '2 × 40HC', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '14,800 kg', bl: '14,800 kg', result: 'match', reason: '' },
-    ],
-  },
-  {
-    id: 'email_009',
-    subject: 'SI Documents — Hapag #0228',
-    senderName: 'Hapag-Lloyd AG',
-    sender: 'ops@hapag-lloyd.com',
-    received: '16 Nov',
-    docType: 'SI + BL',
-    docResult: 'review',
-    reviewDetail: 'Unable to identify Notify Party & Port of Discharge — scanning artefacts on BL',
-    classification: 'check',
-    classifyType: 'BL Comparison',
-    fields: [
-      { field: 'Shipper', si: 'Hapag Logistics GmbH', bl: 'Hapag Logistics GmbH', result: 'match', reason: '' },
-      { field: 'Consignee', si: 'Orient Pacific Co. Ltd.', bl: 'Orient Pacific Co. Ltd.', result: 'match', reason: '' },
-      { field: 'Notify Party', si: 'Orient Pacific Co. Ltd.', bl: 'Unable to identify', result: 'review', reason: 'Notify party field is present in SI but cannot be reliably read from the BL scan.' },
-      { field: 'Port of Loading', si: 'Hamburg, Germany (DEHAM)', bl: 'Hamburg, Germany (DEHAM)', result: 'match', reason: '' },
-      { field: 'Port of Discharge', si: 'Dubai, UAE (AEDXB)', bl: 'Unable to identify', result: 'review', reason: 'Port of discharge is illegible on the BL due to a scanning artefact.' },
-      { field: 'Container Count', si: '1 × 40HC', bl: '1 × 40HC', result: 'match', reason: '' },
-      { field: 'Gross Weight (kg)', si: '9,600 kg', bl: '9,600 kg', result: 'match', reason: '' },
-    ],
-  },
-]
+const EmailsContext = createContext<Email[]>([])
 
-const INITIALLY_CLASSIFIED = new Set(['email_004', 'email_005', 'email_006', 'email_007', 'email_008', 'email_009'])
-const INITIALLY_VERIFIED   = new Set(['email_004', 'email_005', 'email_006', 'email_007', 'email_008', 'email_009'])
+function useEmails(): Email[] {
+  return useContext(EmailsContext)
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -315,7 +99,7 @@ function getReviewReason(email: Email): string {
 }
 
 function getVerifSummary(email: Email): string {
-  if (email.docResult === 'match') return 'All 7 fields verified'
+  if (email.docResult === 'match') return email.fields.length > 0 ? 'All 7 fields verified' : 'No documents to compare'
   if (email.docResult === 'mismatch') {
     const m = email.fields.filter(f => f.result === 'mismatch').length
     return `${m} field${m > 1 ? 's' : ''} mismatched`
@@ -530,6 +314,7 @@ function OverviewScreen({ setScreen, setActiveNav, setVerifTab, verifiedEmails, 
   setScreen: (s: Screen) => void; setActiveNav: (n: NavItem) => void; setVerifTab: (t: VerifTab) => void
   verifiedEmails: Set<string>; manualDecisions: Map<string, ManualDecision>; onSelectEmail: (id: string) => void
 }) {
+  const allEmails = useEmails()
   const verified = allEmails.filter(e => verifiedEmails.has(e.id))
   const matchCount    = verified.filter(e => effectiveResult(e, manualDecisions) === 'match').length
   const mismatchCount = verified.filter(e => effectiveResult(e, manualDecisions) === 'mismatch').length
@@ -668,6 +453,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
   onSelectOthers: (id: string) => void
   onSelectReview: (id: string) => void
 }) {
+  const allEmails = useEmails()
   const [activeInboxTab, setActiveInboxTab] = useState<InboxTab>('new')
 
   const effClass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification, classifyType: e.classifyType }
@@ -854,6 +640,7 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
   onVerify: (id: string) => void; setScreen: (s: Screen) => void
   setActiveNav: (n: NavItem) => void; setVerifTab: (t: VerifTab) => void
 }) {
+  const allEmails = useEmails()
   const email = emailId ? allEmails.find(e => e.id === emailId) : null
   if (!email) return null
   const isClassified = classifiedEmails.has(email.id)
@@ -883,10 +670,8 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
             </div>
           </div>
           <div className="px-7 py-6 border-b border-[#F0EEE9]">
-            <div className="text-[13px] text-[#374151] leading-[1.75] space-y-3">
-              <p>Dear Trade Operations Team,</p>
-              <p>Please find attached the {email.docType} documents for the above-referenced shipment. Kindly review and confirm all shipping details are accurate prior to cargo release.</p>
-              <p>Best regards,<br />{email.senderName}</p>
+            <div className="text-[13px] text-[#374151] leading-[1.75]">
+              <p className="whitespace-pre-wrap break-words">{email.body || 'This email has no message text.'}</p>
             </div>
           </div>
           {isBL && (
@@ -925,6 +710,7 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
 function OthersDetailScreen({ emailId, onMarkRead, setScreen }: {
   emailId: string | null; onMarkRead: (id: string) => void; setScreen: (s: Screen) => void
 }) {
+  const allEmails = useEmails()
   const email = emailId ? allEmails.find(e => e.id === emailId) : null
   if (!email) return null
 
@@ -948,10 +734,8 @@ function OthersDetailScreen({ emailId, onMarkRead, setScreen }: {
             </div>
           </div>
           <div className="px-7 py-6 border-b border-[#F0EEE9]">
-            <div className="text-[13px] text-[#374151] leading-[1.75] space-y-3">
-              <p>Dear Trade Team,</p>
-              <p>This is a {email.classifyType?.toLowerCase() ?? 'general'} communication from {email.senderName}. Please review at your convenience. No SI/BL verification action is required for this email.</p>
-              <p>Best regards,<br />{email.senderName}</p>
+            <div className="text-[13px] text-[#374151] leading-[1.75]">
+              <p className="whitespace-pre-wrap break-words">{email.body || 'This email has no message text.'}</p>
             </div>
           </div>
           <div className="px-7 py-5 flex justify-between items-center">
@@ -978,6 +762,7 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
   setScreen: (s: Screen) => void; onSelectEmail: (id: string) => void
   onSelectReview: (id: string) => void
 }) {
+  const allEmails = useEmails()
   const verified = allEmails.filter(e => verifiedEmails.has(e.id))
   const effClass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification }
 
@@ -1065,6 +850,7 @@ function VerificationDetailScreen({ emailId, manualDecisions, setScreen, onFlagR
   emailId: string | null; manualDecisions: Map<string, ManualDecision>
   setScreen: (s: Screen) => void; onFlagReview: (id: string) => void
 }) {
+  const allEmails = useEmails()
   const email = emailId ? allEmails.find(e => e.id === emailId) : null
   if (!email) return null
   const eff = effectiveResult(email, manualDecisions)
@@ -1155,6 +941,7 @@ function ManualReviewScreen({ emailId, setScreen, backTo, onClassifyOther, onCla
   onClassifyOther?: (id: string, category: string) => void
   onClassifyBL?: (id: string, verifyNow: boolean) => void
 }) {
+  const allEmails = useEmails()
   const [classifyStep, setClassifyStep] = useState<ClassifyStep>('main')
   const [selectedOtherCat, setSelectedOtherCat] = useState<string | null>(null)
 
@@ -1213,9 +1000,7 @@ function ManualReviewScreen({ emailId, setScreen, backTo, onClassifyOther, onCla
                   <div className="mb-3"><div className="text-[11px] text-[#9CA3AF] mb-0.5">Subject</div><div className="text-[13px] text-[#374151]">{email.subject}</div></div>
                   <div className="mb-4"><div className="text-[11px] text-[#9CA3AF] mb-0.5">Received</div><div className="text-[12px] text-[#374151]">{email.received}</div></div>
                   <div className="text-[12.5px] text-[#6B7280] leading-[1.7] border-t border-[#F0EEE9] pt-4">
-                    <p className="mb-2">Dear Trade Operations Team,</p>
-                    <p>Please find attached the {email.docType} documents. Kindly verify the documents and confirm all shipping details.</p>
-                    <p className="mt-2">Best regards, {email.senderName}</p>
+                    <p className="whitespace-pre-wrap break-words">{email.body || 'This email has no message text.'}</p>
                   </div>
                 </div>
               </div>
@@ -1385,6 +1170,7 @@ function FinalDecisionScreen({ emailId, setScreen, setActiveNav, setVerifTab, on
   setActiveNav: (n: NavItem) => void; setVerifTab: (t: VerifTab) => void
   onDecision: (id: string, d: ManualDecision) => void
 }) {
+  const allEmails = useEmails()
   const email = emailId ? allEmails.find(e => e.id === emailId) : null
   if (!email) return null
 
@@ -1437,6 +1223,7 @@ function FinalDecisionScreen({ emailId, setScreen, setActiveNav, setVerifTab, on
 function ResendScreen({ manualDecisions, resentEmails, setScreen, onSelectEmail, onResend }: {
   manualDecisions: Map<string, ManualDecision>; resentEmails: Set<string>; setScreen: (s: Screen) => void; onSelectEmail: (id: string) => void; onResend: (id: string) => void
 }) {
+  const allEmails = useEmails()
   const resendEmails = allEmails.filter(e => manualDecisions.get(e.id) === 'resend' && !resentEmails.has(e.id))
   return (
     <div className="flex-1 overflow-y-auto">
@@ -1519,24 +1306,87 @@ const CATEGORY_LABELS: Record<string, string> = {
   SPAM: 'Spam',
 }
 
-function toEmail(result: ApiResult, subject: string, sender: string): Email {
-  const now = new Date()
-  const hours = now.getHours()
-  const minutes = String(now.getMinutes()).padStart(2, '0')
-  const received = `Today, ${hours % 12 || 12}:${minutes} ${hours < 12 ? 'AM' : 'PM'}`
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
+// "21 Sep, 3:32 PM", the format receivedSortKey understands.
+function formatReceived(date: Date): string {
+  const hours = date.getHours()
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${date.getDate()} ${MONTHS[date.getMonth()]}, ${hours % 12 || 12}:${minutes} ${hours < 12 ? 'AM' : 'PM'}`
+}
+
+function docResultFor(status: ApiResult['status']): DocResult {
+  return status === 'OK' ? 'match' : status === 'MISMATCH' ? 'mismatch' : 'review'
+}
+
+function reviewDetailFor(reason: string | null): string | undefined {
+  return reason ? REVIEW_REASONS[reason] ?? reason : undefined
+}
+
+function labelFields(fields: ApiResult['fields']): VerifField[] {
+  return fields.map(f => ({ ...f, field: FIELD_LABELS[f.field] ?? f.field }))
+}
+
+// A live check result, shown as an SI + BL comparison email.
+function toEmail(result: ApiResult, subject: string, sender: string, body: string): Email {
   return {
     id: result.email_id,
     subject,
     senderName: sender || 'Live upload',
     sender: sender || 'live upload',
-    received,
+    received: formatReceived(new Date()),
     docType: 'SI + BL',
-    docResult: result.status === 'OK' ? 'match' : result.status === 'MISMATCH' ? 'mismatch' : 'review',
-    reviewDetail: result.review_reason ? REVIEW_REASONS[result.review_reason] ?? result.review_reason : undefined,
+    docResult: docResultFor(result.status),
+    reviewDetail: reviewDetailFor(result.review_reason),
     classification: 'check',
     classifyType: 'BL Comparison',
-    fields: result.fields.map(f => ({ ...f, field: FIELD_LABELS[f.field] ?? f.field })),
+    body,
+    fields: labelFields(result.fields),
+  }
+}
+
+// A sample-inbox email from GET /api/emails.
+function fromRecord(record: ApiEmailRecord): Email {
+  const isBL = record.category === 'BL_COMPARISON'
+
+  return {
+    id: record.id,
+    subject: record.subject,
+    senderName: record.senderName,
+    sender: record.sender,
+    received: record.received,
+    docType: record.docType,
+    docResult: docResultFor(record.status),
+    reviewDetail: reviewDetailFor(record.reviewReason),
+    classification: isBL ? 'check' : 'ignore',
+    classifyType: isBL ? 'BL Comparison' : CATEGORY_LABELS[record.category] ?? record.docType,
+    body: record.body,
+    fields: labelFields(record.fields),
+  }
+}
+
+// Live checks are kept in this browser's localStorage, so they survive a page
+// refresh without a database. They are private to this browser and are lost if
+// the user clears site data.
+const LIVE_STORAGE_KEY = 'smartdoc.liveChecks'
+const LIVE_STORAGE_LIMIT = 50
+
+function loadLiveEmails(): Email[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(LIVE_STORAGE_KEY) ?? '[]')
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(e => e && typeof e.id === 'string' && Array.isArray(e.fields))
+  } catch {
+    return []
+  }
+}
+
+function saveLiveEmail(email: Email) {
+  try {
+    const saved = [email, ...loadLiveEmails()].slice(0, LIVE_STORAGE_LIMIT)
+    window.localStorage.setItem(LIVE_STORAGE_KEY, JSON.stringify(saved))
+  } catch {
+    // Storage is full or blocked: the check still shows for this session.
   }
 }
 
@@ -1581,7 +1431,7 @@ function LiveCheckScreen({ onResult }: { onResult: (email: Email) => void }) {
         const label = CATEGORY_LABELS[result.category] ?? result.category
         setNotice(`The email text was classified as "${label}", so no SI/BL comparison was run. Describe the request as a document check in the subject or message and try again.`)
       } else {
-        onResult(toEmail(result, subject || 'Live check', sender))
+        onResult(toEmail(result, subject || 'Live check', sender, body))
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.')
@@ -1644,7 +1494,8 @@ function LiveCheckScreen({ onResult }: { onResult: (email: Email) => void }) {
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-export default function App() {
+function Workspace({ initialEmails }: { initialEmails: Email[] }) {
+  const [allEmails, setAllEmails]   = useState<Email[]>(initialEmails)
   const [screen, setScreen]         = useState<Screen>('overview')
   const [activeNav, setActiveNav]   = useState<NavItem>('overview')
   const [verifTab, setVerifTab]     = useState<VerifTab>('match')
@@ -1652,8 +1503,9 @@ export default function App() {
   const [reviewEmailId, setReviewEmailId]     = useState<string | null>(null)
   const [reviewBackTo, setReviewBackTo]       = useState<Screen>('inbox')
 
-  const [classifiedEmails, setClassifiedEmails] = useState<Set<string>>(new Set(INITIALLY_CLASSIFIED))
-  const [verifiedEmails, setVerifiedEmails]     = useState<Set<string>>(new Set(INITIALLY_VERIFIED))
+  // The pipeline has already classified every email and compared every SI + BL pair.
+  const [classifiedEmails, setClassifiedEmails] = useState<Set<string>>(new Set(initialEmails.map(e => e.id)))
+  const [verifiedEmails, setVerifiedEmails]     = useState<Set<string>>(new Set(initialEmails.filter(e => e.classification === 'check').map(e => e.id)))
   const [readEmails, setReadEmails]             = useState<Set<string>>(new Set())
   const [manualDecisions, setManualDecisions]   = useState<Map<string, ManualDecision>>(new Map())
   const [resentEmails, setResentEmails]           = useState<Set<string>>(new Set())
@@ -1668,10 +1520,11 @@ export default function App() {
     else if (s === 'live-check') setActiveNav('live')
   }
 
-  // Live results are added to the shared email list, then opened like any
-  // other verified email.
+  // Live results are added to the email list and saved in this browser, then
+  // opened like any other verified email.
   function handleLiveResult(email: Email) {
-    allEmails.unshift(email)
+    saveLiveEmail(email)
+    setAllEmails(prev => [email, ...prev])
     setClassifiedEmails(prev => new Set([...prev, email.id]))
     setVerifiedEmails(prev => new Set([...prev, email.id]))
     setSelectedEmailId(email.id)
@@ -1740,6 +1593,7 @@ export default function App() {
   const inboxBadge   = newIncoming + blPending + classifyRev
 
   return (
+    <EmailsContext.Provider value={allEmails}>
     <div className="flex h-screen bg-[#F9F8F6] overflow-hidden" style={{ fontFamily: 'Inter, system-ui, sans-serif' }}>
       <Sidebar activeNav={activeNav} activeVerifTab={verifTab}
         setActiveNav={setActiveNav} setScreen={handleSetScreen}
@@ -1797,5 +1651,62 @@ export default function App() {
         {screen === 'live-check' && <LiveCheckScreen onResult={handleLiveResult} />}
       </main>
     </div>
+    </EmailsContext.Provider>
   )
+}
+
+// ─── Loading the emails ───────────────────────────────────────────────────────
+
+function StatusScreen({ title, message, action }: { title: string; message: string; action?: React.ReactNode }) {
+  return (
+    <div className="flex h-screen items-center justify-center bg-[#F9F8F6] px-6" style={{ fontFamily: 'Inter, system-ui, sans-serif' }}>
+      <div className="bg-white border border-[#E8E6E1] rounded-xl px-8 py-7 max-w-[420px] text-center">
+        <div className="text-[15px] font-semibold text-[#111827] mb-2">{title}</div>
+        <p className="text-[13px] text-[#6B7280] leading-[1.6]">{message}</p>
+        {action && <div className="mt-5">{action}</div>}
+      </div>
+    </div>
+  )
+}
+
+export default function App() {
+  const [records, setRecords] = useState<ApiEmailRecord[] | null>(null)
+  const [error, setError]     = useState<string | null>(null)
+  const [slow, setSlow]       = useState(false)
+  const [attempt, setAttempt] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    // Free hosting sleeps when idle, so the first request can take a while.
+    const timer = setTimeout(() => setSlow(true), 6000)
+
+    fetchEmails()
+      .then(loaded => { if (!cancelled) setRecords(loaded) })
+      .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Something went wrong.') })
+      .finally(() => clearTimeout(timer))
+
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [attempt])
+
+  function retry() {
+    setError(null)
+    setSlow(false)
+    setAttempt(n => n + 1)
+  }
+
+  if (error) {
+    return (
+      <StatusScreen title="Could not load the emails" message={error}
+        action={<button onClick={retry} className="bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[13px] font-medium px-5 py-2.5 rounded-lg transition-colors">Try again</button>} />
+    )
+  }
+
+  if (!records) {
+    return (
+      <StatusScreen title="Loading emails…"
+        message={slow ? 'The server is waking up. The first load after a quiet period can take up to a minute.' : 'Fetching the pipeline results.'} />
+    )
+  }
+
+  return <Workspace initialEmails={[...loadLiveEmails(), ...records.map(fromRecord)]} />
 }

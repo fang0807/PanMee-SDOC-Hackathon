@@ -7,6 +7,23 @@ The system has two parts that talk over HTTP:
 
 `python main.py` (see `RUN_AND_SCORE.md`) still runs the batch pipeline and scoring on its own.
 
+## Where the data comes from (no database)
+
+- **The 520 sample emails.** `backend/export_ui_data.py` runs the pipeline over the whole inbox and writes
+  `backend/ui_data.json`. The API serves it at `GET /api/emails`, and the website loads it on start.
+  The script also checks every record against `submission.json` and fails if they differ.
+  Run it again, and commit the file, whenever the pipeline changes:
+
+  ```powershell
+  cd backend
+  python export_ui_data.py
+  ```
+
+- **Live checks.** `POST /api/process` does not store anything. The website keeps the results of your live
+  checks in this browser's `localStorage`, so they survive a refresh but are private to that browser and
+  disappear if site data is cleared.
+- **Manual review decisions** (Match, Resend, Keep in review) are not saved and reset on refresh.
+
 ## Run locally
 
 Terminal 1, the API:

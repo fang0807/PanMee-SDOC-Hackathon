@@ -4,6 +4,7 @@ Run locally:   uvicorn api:app --port 8000
 Environment:   ALLOWED_ORIGINS  comma-separated origins allowed by CORS
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import main as pipeline
 from loader import Inbox
+from ui_records import build_fields
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -38,16 +40,17 @@ ALLOWED_SUFFIXES = {
 # PORT_VALUES, OCR_CASES), so only one request may use it at a time.
 PIPELINE_LOCK = threading.Lock()
 
-# Field order and the names used in defect_fields.
-FIELD_ORDER = [
-    "shipper",
-    "consignee",
-    "notify_party",
-    "port_of_loading",
-    "port_of_discharge",
-    "container_count",
-    "gross_weight",
-]
+UI_DATA_PATH = Path(__file__).resolve().parent / "ui_data.json"
+
+
+def load_ui_emails():
+    if not UI_DATA_PATH.exists():
+        return []
+
+    return json.loads(UI_DATA_PATH.read_text(encoding="utf-8"))
+
+
+UI_EMAILS = load_ui_emails()
 
 
 app = FastAPI(title="SmartDoc SI/BL checker")
@@ -119,50 +122,11 @@ def run_pipeline(email, workdir):
     return result, detail
 
 
-def build_fields(result, detail):
-    """Per-field table for the UI: values from each document and a verdict."""
+@app.get("/api/emails")
+def list_emails():
+    """The pipeline results for the sample inbox (see export_ui_data.py)."""
 
-    if "si_fields" not in detail:
-        return []
-
-    defects = set(result["defect_fields"])
-    fields = []
-
-    for name in FIELD_ORDER:
-        key = pipeline.convert_field_name(name)
-
-        si_value = detail["si_fields"].get(name)
-        bl_value = detail["bl_fields"].get(name)
-
-        if key in defects:
-            verdict = "mismatch"
-            reason = "The SI and the BL do not agree on this field."
-
-        elif (
-            result["status"] == "NEEDS_REVIEW"
-            and (
-                not pipeline.has_real_value(si_value)
-                or not pipeline.has_real_value(bl_value)
-            )
-        ):
-            verdict = "review"
-            reason = "This value is missing or unreadable in one document."
-
-        else:
-            verdict = "match"
-            reason = ""
-
-        fields.append(
-            {
-                "field": key,
-                "si": "" if si_value is None else str(si_value),
-                "bl": "" if bl_value is None else str(bl_value),
-                "result": verdict,
-                "reason": reason,
-            }
-        )
-
-    return fields
+    return UI_EMAILS
 
 
 @app.post("/api/process")

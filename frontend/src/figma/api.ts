@@ -20,6 +20,22 @@ export interface ApiResult {
   fields: ApiField[]
 }
 
+// One sample-inbox email with its pipeline result (GET /api/emails).
+export interface ApiEmailRecord {
+  id: string
+  subject: string
+  sender: string
+  senderName: string
+  body: string
+  received: string
+  docType: string
+  category: string
+  status: 'OK' | 'MISMATCH' | 'NEEDS_REVIEW'
+  defectFields: string[]
+  reviewReason: string | null
+  fields: ApiField[]
+}
+
 export interface CheckRequest {
   subject: string
   body: string
@@ -39,6 +55,33 @@ export const FIELD_LABELS: Record<string, string> = {
   gross_weight_kg: 'Gross Weight (kg)',
 }
 
+async function errorMessage(response: Response): Promise<string> {
+  let message = `The server returned an error (${response.status}).`
+
+  try {
+    const payload = await response.json()
+    if (typeof payload.detail === 'string') message = payload.detail
+  } catch {
+    // Keep the generic message when the body is not JSON.
+  }
+
+  return message
+}
+
+export async function fetchEmails(): Promise<ApiEmailRecord[]> {
+  let response: Response
+
+  try {
+    response = await fetch(`${API_URL}/api/emails`)
+  } catch {
+    throw new Error('Could not reach the server. Check your connection and try again.')
+  }
+
+  if (!response.ok) throw new Error(await errorMessage(response))
+
+  return response.json()
+}
+
 export async function checkDocuments(request: CheckRequest): Promise<ApiResult> {
   const form = new FormData()
   form.append('subject', request.subject)
@@ -55,18 +98,7 @@ export async function checkDocuments(request: CheckRequest): Promise<ApiResult> 
     throw new Error('Could not reach the server. Check your connection and try again.')
   }
 
-  if (!response.ok) {
-    let message = `The server returned an error (${response.status}).`
-
-    try {
-      const payload = await response.json()
-      if (typeof payload.detail === 'string') message = payload.detail
-    } catch {
-      // Keep the generic message when the body is not JSON.
-    }
-
-    throw new Error(message)
-  }
+  if (!response.ok) throw new Error(await errorMessage(response))
 
   return response.json()
 }
