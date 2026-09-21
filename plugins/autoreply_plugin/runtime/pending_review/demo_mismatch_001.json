@@ -1,0 +1,13 @@
+{
+  "email_id": "demo_mismatch_001",
+  "verification_status": "MISMATCH",
+  "recipient": "client@example.com",
+  "subject": "Re: SI submission for XYZ789",
+  "body": "Dear Client,\n\nThank you for your submission. During verification, we identified differences that require your attention.\n\nThe following item(s) do not match between the SI and the draft BL:\n- Port of Discharge\n- Gross Weight\n\nPlease review the information and provide the corrected details or documents.\n\nBest regards,\nSmartDoc Verification Team",
+  "defect_fields": [
+    "port_of_discharge",
+    "gross_weight_kg"
+  ],
+  "requires_employee_review": true,
+  "created_at": "2026-09-21T16:04:09.486617+00:00"
+}

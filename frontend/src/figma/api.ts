@@ -10,6 +10,18 @@ export interface ApiField {
   reason: string
 }
 
+export interface ApiAutoReply {
+  ok: boolean
+  email_id?: string
+  status?: string | null
+  action: 'SENT' | 'PREVIEW_ONLY' | 'REVIEW_REQUIRED' | 'SKIPPED' | 'ERROR' | string
+  recipient?: string
+  subject?: string
+  body?: string
+  path?: string
+  reason?: string
+}
+
 export interface ApiResult {
   email_id: string
   category: string
@@ -18,6 +30,7 @@ export interface ApiResult {
   defect_fields: string[]
   review_reason: string | null
   fields: ApiField[]
+  auto_reply?: ApiAutoReply
 }
 
 // One sample-inbox email with its pipeline result (GET /api/emails).
