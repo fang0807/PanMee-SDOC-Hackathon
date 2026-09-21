@@ -1733,9 +1733,6 @@ function LiveCheckScreen({ onSave, onView }: {
   onSave: (email: Email) => boolean
   onView: (id: string, tab: VerifTab) => void
 }) {
-  const [subject, setSubject] = useState('Please check SI and draft BL')
-  const [body, setBody] = useState('Attached are the SI and draft BL. Please check the details and confirm.')
-  const [sender, setSender] = useState('')
   const [si, setSi] = useState<File | null>(null)
   const [bl, setBl] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
@@ -1760,11 +1757,14 @@ function LiveCheckScreen({ onSave, onView }: {
     const timer = setTimeout(() => setSlow(true), 6000)
 
     try {
+      const liveSubject = `${si.name} vs ${bl.name}`
+      const liveBody = `Uploaded on the Live check page.\nShipping Instruction: ${si.name}\nBill of Lading: ${bl.name}`
+
       setResult(toEmail(
-        await checkDocuments({ subject, body, sender, si, bl }),
-        subject || `${si.name} vs ${bl.name}`,
-        sender,
-        body || `Uploaded on the Live check page.\nShipping Instruction: ${si.name}\nBill of Lading: ${bl.name}`,
+        await checkDocuments({ subject: liveSubject, body: liveBody, sender: '', si, bl }),
+        liveSubject,
+        '',
+        liveBody,
       ))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.')
@@ -1795,32 +1795,19 @@ function LiveCheckScreen({ onSave, onView }: {
     setResetKey(k => k + 1)
   }
 
-  const inputCls = 'w-full bg-white border border-[#E5E7EB] focus:border-[#2563EB] focus:outline-none rounded-lg px-3.5 py-2.5 text-[13px] text-[#111827]'
 
   return (
     <div className="flex-1 overflow-y-auto">
       <TopBar title="Live check" subtitle="Upload an SI and a BL" />
       <div className="px-8 py-7 max-w-[940px]">
         <p className="text-[13px] text-[#6B7280] leading-[1.6] mb-6 max-w-[720px]">
-          Upload a Shipping Instruction and a Bill of Lading. The system compares the two documents field by field and tells you whether they match. Nothing is kept unless you choose Save to Verification, and the uploaded files are never kept.
+          Upload a Shipping Instruction and a Bill of Lading. The system compares the two documents field by field and tells you whether they match. No email details are required. Nothing is kept unless you choose Save to Verification, and the uploaded files are never kept.
         </p>
         <div className="bg-white border border-[#E8E6E1] rounded-xl px-6 py-6 space-y-5 max-w-[720px]">
           <div className="grid grid-cols-2 gap-4">
             <FilePicker key={`si-${resetKey}`} label="Shipping Instruction (SI)" file={si} onChange={setSi} />
             <FilePicker key={`bl-${resetKey}`} label="Bill of Lading (BL)" file={bl} onChange={setBl} />
           </div>
-          <label className="block">
-            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email subject</span>
-            <input className={inputCls} value={subject} onChange={e => setSubject(e.target.value)} />
-          </label>
-          <label className="block">
-            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Sender email <span className="text-[#9CA3AF] font-normal">(needed for Auto Reply / Resend)</span></span>
-            <input className={inputCls} type="email" value={sender} placeholder="name@company.com" onChange={e => setSender(e.target.value)} />
-          </label>
-          <label className="block">
-            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email message</span>
-            <textarea className={`${inputCls} min-h-[90px] resize-y`} value={body} onChange={e => setBody(e.target.value)} />
-          </label>
           <div className="flex items-center justify-between gap-4">
             <span className="text-[11.5px] text-[#9CA3AF]">Accepted: txt, pdf, docx, xlsx and images, up to 10 MB each.</span>
             <button onClick={submit} disabled={!si || !bl || loading}
