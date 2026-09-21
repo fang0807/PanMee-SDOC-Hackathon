@@ -1,0 +1,12 @@
+.git/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+plugins/autoreply_plugin/runtime/
+backend/results.json
+backend/submission.json
+backend/review_queue.json

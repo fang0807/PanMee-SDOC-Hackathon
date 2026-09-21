@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -387,14 +387,17 @@ async def attachment_sheet(email_id: str, role: str):
 
 @app.post("/api/process")
 async def process(
+    subject: str = Form(""),
+    body: str = Form(""),
+    sender: str = Form(""),
     si: UploadFile = File(...),
     bl: UploadFile = File(...),
 ):
     """Compare an uploaded SI and BL.
 
     An upload of the two documents is a document check by definition, so
-    no email subject or message is needed (extra form fields from an
-    older client are ignored).
+    classification is skipped. Subject/body/sender metadata are accepted
+    so the standalone Auto Reply plugin can address the original sender.
     """
 
     email_id = f"live_{uuid.uuid4().hex[:8]}"
@@ -408,6 +411,10 @@ async def process(
 
         email = {
             "email_id": email_id,
+            "from": sender,
+            "sender": sender,
+            "subject": subject,
+            "body": body,
             "attachments": attachments,
         }
 

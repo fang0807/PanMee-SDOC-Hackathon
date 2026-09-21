@@ -27,8 +27,9 @@ The system has two parts that talk over HTTP:
   `GET /api/emails/{id}/attachments/{SI|BL}/file` (also `/text` and `/sheet`). They are read from
   `backend/attachments/` (1.6 MB), which is copied into the Docker image, so keep it out of
   `backend/.dockerignore`. Without it the deployed preview returns 404.
-- **Live checks.** `POST /api/process` takes only an SI and a BL (no email subject or message, and no
-  classification step) and does not store anything; the uploads are deleted after the check. The result is
+- **Live checks.** `POST /api/process` takes an SI and a BL plus optional email subject, sender and message metadata.
+  The comparison itself skips classification and the uploads are deleted after the check. The sender address is
+  required for Auto Reply / Resend to address a client. The result is
   shown on the Live check page with two choices: **Save to Verification** or **Run next test**. Saving keeps
   only the result, in that browser's `localStorage` (latest 50): it then appears in Verification and Overview
   there, but it is private to that browser, is lost if site data is cleared, and has no attachment preview
@@ -64,18 +65,19 @@ manual review. The Docker image below already includes it.
 
 ### 1. Backend on Render (or Railway / Fly) with Docker
 
+The backend now imports the standalone `plugins/autoreply_plugin` package, so the Docker build context must be the **repository root** (not only `backend/`). A root `Dockerfile` is provided for this.
+
 1. Push the repo to GitHub.
-2. Render: **New > Web Service**, pick the repo, set **Root Directory** to `backend`, **Runtime** to Docker.
-3. Add the environment variable `ALLOWED_ORIGINS` set to your Vercel URL, for example
-   `https://your-app.vercel.app`. Separate several origins with commas.
-4. Deploy, then open `https://<your-service>.onrender.com/health`. It should return `{"status":"ok"}`.
+2. Render: **New > Web Service**, pick the repo, leave **Root Directory** at the repository root, and use **Runtime: Docker**.
+3. Add `ALLOWED_ORIGINS` set to your Vercel URL, for example `https://your-app.vercel.app`.
+4. For live Match auto-replies, also add `AUTOREPLY_LIVE_SEND=1`, `AUTOREPLY_SMTP_USERNAME`, `AUTOREPLY_SMTP_PASSWORD` (Gmail App Password), and `AUTOREPLY_FROM_ADDRESS`.
+5. Deploy, then open `https://<your-service>.onrender.com/health`. It should return `{"status":"ok"}`.
 
 Free plans sleep when idle. Open the `/health` URL a minute before a demo.
 
-Test the image locally before deploying:
+Test the image locally before deploying, from the repository root:
 
 ```powershell
-cd backend
 docker build -t smartdoc-api .
 docker run --rm -p 8000:8000 smartdoc-api
 ```
