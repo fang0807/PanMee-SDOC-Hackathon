@@ -71,6 +71,9 @@ export interface ApiEmailRecord {
 }
 
 export interface CheckRequest {
+  subject: string
+  body: string
+  sender: string
   si: File
   bl: File
 }
@@ -158,6 +161,9 @@ export async function fetchAttachmentPlainText(emailId: string, role: Attachment
 
 export async function checkDocuments(request: CheckRequest): Promise<ApiResult> {
   const form = new FormData()
+  form.append('subject', request.subject)
+  form.append('body', request.body)
+  form.append('sender', request.sender)
   form.append('si', request.si)
   form.append('bl', request.bl)
 

@@ -863,8 +863,8 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
               {activeTab === 'match' ? 'No verified matches yet.' : activeTab === 'mismatch' ? 'No mismatches found.' : 'No documents requiring review.'}
             </div>
           : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-              <div className="grid grid-cols-[1fr_100px_140px_160px_32px] text-[11px] font-semibold text-[#9CA3AF] uppercase tracking-wide px-6 py-3 border-b border-[#F0EEE9] bg-[#FAFAF9]">
-                <span>Document</span><span>Type</span><span>Received</span><span>Result</span><span />
+              <div className="grid grid-cols-[1fr_100px_140px_160px_110px_32px] text-[11px] font-semibold text-[#9CA3AF] uppercase tracking-wide px-6 py-3 border-b border-[#F0EEE9] bg-[#FAFAF9]">
+                <span>Document</span><span>Type</span><span>Received</span><span>Result</span><span>Auto Reply</span><span />
               </div>
               {filtered.map((email, i) => {
                 const eff = effectiveResult(email, manualDecisions)
@@ -876,7 +876,7 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
                     if (isClassifyReviewOnly) { onSelectReview(email.id); setScreen('manual-review') }
                     else { onSelectEmail(email.id); setScreen('verification-detail') }
                   }}
-                    className={`w-full grid grid-cols-[1fr_100px_140px_160px_32px] items-center px-6 py-4 text-left group hover:bg-[#F5F7FF] transition-colors ${i < filtered.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
+                    className={`w-full grid grid-cols-[1fr_100px_140px_160px_110px_32px] items-center px-6 py-4 text-left group hover:bg-[#F5F7FF] transition-colors ${i < filtered.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
                     <div className="min-w-0 pr-4">
                       <div className="text-[13px] font-medium text-[#111827] truncate group-hover:text-[#2563EB] transition-colors">{email.subject}</div>
                       {reason
@@ -890,6 +890,20 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
                     <span className="text-[11px] font-medium text-[#6B7280] bg-[#F3F4F6] px-2 py-0.5 rounded self-start mt-0.5">{email.docType}</span>
                     <span className="text-[12px] text-[#9CA3AF]">{email.received}</span>
                     <Badge result={disp} />
+                    <span className="text-[11.5px] text-[#9CA3AF]">
+                      {email.autoReply?.action === 'SENT'
+                        ? <span className="inline-flex items-center gap-1 text-[#16A34A] font-medium">
+                            <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 7.5l2.5 2.5L11 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                            Sent
+                          </span>
+                        : email.autoReply?.action === 'PREVIEW_ONLY'
+                          ? 'Preview'
+                          : email.autoReply?.action === 'ERROR'
+                            ? <span className="text-[#DC2626]">Error</span>
+                            : email.autoReply?.action === 'REVIEW_REQUIRED'
+                              ? 'Review'
+                              : '—'}
+                    </span>
                     <span className="text-[#D1D5DB] group-hover:text-[#2563EB] transition-colors justify-self-end"><Chevron /></span>
                   </button>
                 )
@@ -1633,12 +1647,12 @@ function labelFields(fields: ApiResult['fields']): VerifField[] {
 
 // A live check result in the shape the result components read. It stays on
 // the Live check page unless the employee chooses Save to Verification.
-function toEmail(result: ApiResult, subject: string, body: string): Email {
+function toEmail(result: ApiResult, subject: string, sender: string, body: string): Email {
   return {
     id: result.email_id,
     subject,
-    senderName: 'Live upload',
-    sender: 'live upload',
+    senderName: sender || 'Live upload',
+    sender: sender || '',
     received: formatReceived(new Date()),
     docType: 'SI + BL',
     docResult: docResultFor(result.status),
@@ -1719,6 +1733,9 @@ function LiveCheckScreen({ onSave, onView }: {
   onSave: (email: Email) => boolean
   onView: (id: string, tab: VerifTab) => void
 }) {
+  const [subject, setSubject] = useState('Please check SI and draft BL')
+  const [body, setBody] = useState('Attached are the SI and draft BL. Please check the details and confirm.')
+  const [sender, setSender] = useState('')
   const [si, setSi] = useState<File | null>(null)
   const [bl, setBl] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
@@ -1744,9 +1761,10 @@ function LiveCheckScreen({ onSave, onView }: {
 
     try {
       setResult(toEmail(
-        await checkDocuments({ si, bl }),
-        `${si.name} vs ${bl.name}`,
-        `Uploaded on the Live check page.\nShipping Instruction: ${si.name}\nBill of Lading: ${bl.name}`,
+        await checkDocuments({ subject, body, sender, si, bl }),
+        subject || `${si.name} vs ${bl.name}`,
+        sender,
+        body || `Uploaded on the Live check page.\nShipping Instruction: ${si.name}\nBill of Lading: ${bl.name}`,
       ))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.')
@@ -1777,6 +1795,8 @@ function LiveCheckScreen({ onSave, onView }: {
     setResetKey(k => k + 1)
   }
 
+  const inputCls = 'w-full bg-white border border-[#E5E7EB] focus:border-[#2563EB] focus:outline-none rounded-lg px-3.5 py-2.5 text-[13px] text-[#111827]'
+
   return (
     <div className="flex-1 overflow-y-auto">
       <TopBar title="Live check" subtitle="Upload an SI and a BL" />
@@ -1789,6 +1809,18 @@ function LiveCheckScreen({ onSave, onView }: {
             <FilePicker key={`si-${resetKey}`} label="Shipping Instruction (SI)" file={si} onChange={setSi} />
             <FilePicker key={`bl-${resetKey}`} label="Bill of Lading (BL)" file={bl} onChange={setBl} />
           </div>
+          <label className="block">
+            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email subject</span>
+            <input className={inputCls} value={subject} onChange={e => setSubject(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Sender email <span className="text-[#9CA3AF] font-normal">(needed for Auto Reply / Resend)</span></span>
+            <input className={inputCls} type="email" value={sender} placeholder="name@company.com" onChange={e => setSender(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email message</span>
+            <textarea className={`${inputCls} min-h-[90px] resize-y`} value={body} onChange={e => setBody(e.target.value)} />
+          </label>
           <div className="flex items-center justify-between gap-4">
             <span className="text-[11.5px] text-[#9CA3AF]">Accepted: txt, pdf, docx, xlsx and images, up to 10 MB each.</span>
             <button onClick={submit} disabled={!si || !bl || loading}
