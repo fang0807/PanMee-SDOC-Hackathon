@@ -1624,8 +1624,11 @@ def build_review_queue():
 
 
 def process_email(
-    email
+    email,
+    detail=None,
 ):
+    # `detail` is an optional dict the API fills with the extracted
+    # fields and comparator output. The batch run leaves it as None.
     email_id = email.get(
         "email_id"
     )
@@ -1888,6 +1891,10 @@ def process_email(
         )
     )
 
+    if detail is not None:
+        detail["si_fields"] = si_fields
+        detail["bl_fields"] = bl_fields
+
     # Ports both documents state identically become trusted
     # vocabulary for checking OCR-read documents later.
     PORT_VALUES.extend(
@@ -1922,6 +1929,10 @@ def process_email(
             "NEEDS_REVIEW",
             review_reason="unreadable",
         )
+
+    if detail is not None:
+        detail["mismatches"] = mismatches
+        detail["missing"] = missing
 
     # ========================================================
     # 9. Explicit missing comes BEFORE mismatch

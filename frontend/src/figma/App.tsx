@@ -1,8 +1,10 @@
 import React, { useState } from 'react'
+import { checkDocuments, FIELD_LABELS, type ApiResult } from './api'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Screen =
+  | 'live-check'
   | 'overview'
   | 'inbox'
   | 'inbox-detail'
@@ -13,7 +15,7 @@ type Screen =
   | 'final-decision'
   | 'resend'
 
-type NavItem = 'overview' | 'inbox' | 'verification' | 'resend'
+type NavItem = 'overview' | 'inbox' | 'verification' | 'resend' | 'live'
 type VerifTab = 'match' | 'mismatch' | 'review'
 type FieldResult = 'match' | 'mismatch' | 'review'
 type DocResult = 'match' | 'mismatch' | 'review'
@@ -454,6 +456,11 @@ function Sidebar({ activeNav, activeVerifTab, setActiveNav, setScreen, setVerifT
           <NavBtn active={activeNav === 'resend'} onClick={() => go('resend', 'resend')}
             icon={<svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="M2 7.5h9M8 4.5l3 3-3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /><path d="M5 3H2.5A1.5 1.5 0 001 4.5v6A1.5 1.5 0 002.5 12H5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>}
             label="Resend" />
+        </div>
+        <div className="pt-3 mt-3 border-t border-[#F0EEE9]">
+          <NavBtn active={activeNav === 'live'} onClick={() => go('live', 'live-check')}
+            icon={<svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="M7.5 10V2M4.5 5l3-3 3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /><path d="M2 10v2.5A1.5 1.5 0 003.5 14h8a1.5 1.5 0 001.5-1.5V10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>}
+            label="Live check" />
         </div>
       </nav>
       <div className="px-4 py-4 border-t border-[#F0EEE9]">
@@ -1496,6 +1503,145 @@ function ResendScreen({ manualDecisions, resentEmails, setScreen, onSelectEmail,
   )
 }
 
+// ─── Live check (calls the backend API) ───────────────────────────────────────
+
+const REVIEW_REASONS: Record<string, string> = {
+  missing_attachment: 'An SI or BL attachment is missing.',
+  unreadable: 'One of the documents could not be read, for example a scanned image.',
+  wrong_doc_type: 'One of the attachments is not the expected document type.',
+  missing_value: 'A required field is missing or blank in one of the documents.',
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
+  SI_REQUEST: 'SI Request',
+  INVOICE_QUERY: 'Invoice Query',
+  GENERAL: 'General',
+  SPAM: 'Spam',
+}
+
+function toEmail(result: ApiResult, subject: string, sender: string): Email {
+  const now = new Date()
+  const hours = now.getHours()
+  const minutes = String(now.getMinutes()).padStart(2, '0')
+  const received = `Today, ${hours % 12 || 12}:${minutes} ${hours < 12 ? 'AM' : 'PM'}`
+
+  return {
+    id: result.email_id,
+    subject,
+    senderName: sender || 'Live upload',
+    sender: sender || 'live upload',
+    received,
+    docType: 'SI + BL',
+    docResult: result.status === 'OK' ? 'match' : result.status === 'MISMATCH' ? 'mismatch' : 'review',
+    reviewDetail: result.review_reason ? REVIEW_REASONS[result.review_reason] ?? result.review_reason : undefined,
+    classification: 'check',
+    classifyType: 'BL Comparison',
+    fields: result.fields.map(f => ({ ...f, field: FIELD_LABELS[f.field] ?? f.field })),
+  }
+}
+
+function FilePicker({ label, file, onChange }: { label: string; file: File | null; onChange: (f: File | null) => void }) {
+  return (
+    <div>
+      <span className="block text-[12px] font-medium text-[#374151] mb-1.5">{label}</span>
+      <label className="flex items-center gap-3 bg-white border border-dashed border-[#D1D5DB] hover:border-[#2563EB] rounded-lg px-4 py-3 cursor-pointer transition-colors">
+        <input type="file" className="hidden" accept=".txt,.pdf,.docx,.xlsx,.png,.jpg,.jpeg,.tif,.tiff,.bmp"
+          onChange={e => onChange(e.target.files?.[0] ?? null)} />
+        <span className="text-[12px] font-medium text-[#2563EB] bg-[#EFF6FF] border border-[#BFDBFE] px-3 py-1.5 rounded-md flex-shrink-0">Choose file</span>
+        <span className={`text-[12.5px] truncate ${file ? 'text-[#111827]' : 'text-[#9CA3AF]'}`}>{file ? file.name : 'No file selected'}</span>
+      </label>
+    </div>
+  )
+}
+
+function LiveCheckScreen({ onResult }: { onResult: (email: Email) => void }) {
+  const [subject, setSubject] = useState('Please check SI and draft BL')
+  const [body, setBody] = useState('Attached are the SI and draft BL. Please check the details and confirm.')
+  const [sender, setSender] = useState('')
+  const [si, setSi] = useState<File | null>(null)
+  const [bl, setBl] = useState<File | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [slow, setSlow] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  async function submit() {
+    if (!si || !bl) return
+    setLoading(true)
+    setSlow(false)
+    setError(null)
+    setNotice(null)
+    // Free hosting sleeps when idle, so the first request can take a while.
+    const timer = setTimeout(() => setSlow(true), 6000)
+
+    try {
+      const result = await checkDocuments({ subject, body, sender, si, bl })
+
+      if (result.category !== 'BL_COMPARISON') {
+        const label = CATEGORY_LABELS[result.category] ?? result.category
+        setNotice(`The email text was classified as "${label}", so no SI/BL comparison was run. Describe the request as a document check in the subject or message and try again.`)
+      } else {
+        onResult(toEmail(result, subject || 'Live check', sender))
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.')
+    } finally {
+      clearTimeout(timer)
+      setLoading(false)
+      setSlow(false)
+    }
+  }
+
+  const inputCls = 'w-full bg-white border border-[#E5E7EB] focus:border-[#2563EB] focus:outline-none rounded-lg px-3.5 py-2.5 text-[13px] text-[#111827]'
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <TopBar title="Live check" subtitle="Upload an SI and a BL" />
+      <div className="px-8 py-7 max-w-[720px]">
+        <p className="text-[13px] text-[#6B7280] leading-[1.6] mb-6">
+          Upload a Shipping Instruction and a Bill of Lading. The backend classifies the email and compares the two documents field by field.
+        </p>
+        <div className="bg-white border border-[#E8E6E1] rounded-xl px-6 py-6 space-y-5">
+          <div className="grid grid-cols-2 gap-4">
+            <FilePicker label="Shipping Instruction (SI)" file={si} onChange={setSi} />
+            <FilePicker label="Bill of Lading (BL)" file={bl} onChange={setBl} />
+          </div>
+          <label className="block">
+            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email subject</span>
+            <input className={inputCls} value={subject} onChange={e => setSubject(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Sender (optional)</span>
+            <input className={inputCls} value={sender} placeholder="name@company.com" onChange={e => setSender(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="block text-[12px] font-medium text-[#374151] mb-1.5">Email message</span>
+            <textarea className={`${inputCls} min-h-[90px] resize-y`} value={body} onChange={e => setBody(e.target.value)} />
+          </label>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-[11.5px] text-[#9CA3AF]">Accepted: txt, pdf, docx, xlsx and images, up to 10 MB each.</span>
+            <button onClick={submit} disabled={!si || !bl || loading}
+              className="flex-shrink-0 bg-[#2563EB] hover:bg-[#1D4ED8] disabled:bg-[#BFDBFE] disabled:cursor-not-allowed text-white text-[13px] font-medium px-5 py-2.5 rounded-lg transition-colors">
+              {loading ? 'Checking…' : 'Run check'}
+            </button>
+          </div>
+        </div>
+        {loading && slow && (
+          <div className="mt-4 px-5 py-3.5 rounded-xl border bg-[#EFF6FF] border-[#BFDBFE] text-[12.5px] text-[#2563EB]">
+            The server is waking up. The first check after a quiet period can take up to a minute.
+          </div>
+        )}
+        {error && (
+          <div className="mt-4 px-5 py-3.5 rounded-xl border bg-[#FEF2F2] border-[#FECACA] text-[12.5px] text-[#DC2626]">{error}</div>
+        )}
+        {notice && (
+          <div className="mt-4 px-5 py-3.5 rounded-xl border bg-[#FFFBEB] border-[#FDE68A] text-[12.5px] text-[#D97706]">{notice}</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -1519,6 +1665,19 @@ export default function App() {
     else if (s === 'inbox' || s === 'inbox-detail' || s === 'others-detail') setActiveNav('inbox')
     else if (s === 'verification' || s === 'verification-detail' || s === 'manual-review' || s === 'final-decision') setActiveNav('verification')
     else if (s === 'resend') setActiveNav('resend')
+    else if (s === 'live-check') setActiveNav('live')
+  }
+
+  // Live results are added to the shared email list, then opened like any
+  // other verified email.
+  function handleLiveResult(email: Email) {
+    allEmails.unshift(email)
+    setClassifiedEmails(prev => new Set([...prev, email.id]))
+    setVerifiedEmails(prev => new Set([...prev, email.id]))
+    setSelectedEmailId(email.id)
+    setVerifTab(email.docResult)
+    setActiveNav('verification')
+    setScreen('verification-detail')
   }
 
   function handleClassify() {
@@ -1635,6 +1794,7 @@ export default function App() {
           <ResendScreen manualDecisions={manualDecisions} resentEmails={resentEmails}
             setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId} onResend={handleResend} />
         )}
+        {screen === 'live-check' && <LiveCheckScreen onResult={handleLiveResult} />}
       </main>
     </div>
   )
