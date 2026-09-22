@@ -7,6 +7,7 @@ import {
   fetchAttachmentSheets,
   fetchAttachmentText,
   fetchEmails,
+  verifyEmail,
   FIELD_LABELS,
   type ApiAttachments,
   type ApiAutoReply,
@@ -55,6 +56,9 @@ interface Email {
   sender: string
   received: string
   docType: string
+  workflowType?: string
+  workflowSubtype?: string
+  source?: string
   docResult: DocResult
   reviewDetail?: string
   classification: Classification
@@ -85,6 +89,10 @@ function effectiveResult(email: Email, decisions: Map<string, ManualDecision>): 
   if (d === 'match') return 'match'
   if (d === 'resend') return 'resend'
   return 'review'
+}
+
+function hasReply(email: Email, repliedEmails: Set<string>): boolean {
+  return repliedEmails.has(email.id) || email.autoReply?.action === 'SENT' || email.autoReply?.action === 'ALREADY_SENT'
 }
 
 function receivedSortKey(received: string): number {
@@ -237,8 +245,13 @@ function TrashIcon() {
 
 // ─── Category filter bar (shared between Inbox Others + Documents Other section) ─
 
-type OtherCatFilter = 'all' | 'Spam' | 'General' | 'Invoice' | 'SI Request'
-const OTHER_CAT_LABELS: OtherCatFilter[] = ['all', 'Spam', 'General', 'Invoice', 'SI Request']
+type OtherCatFilter =
+  | 'all' | 'Spam' | 'General' | 'Invoice' | 'SI Request'
+  | 'BL Draft Request' | 'BL Confirmation Request' | 'BL Amendment Request'
+const OTHER_CAT_LABELS: OtherCatFilter[] = [
+  'all', 'Spam', 'General', 'Invoice', 'SI Request',
+  'BL Draft Request', 'BL Confirmation Request', 'BL Amendment Request',
+]
 
 function OtherCategoryBar({ active, onChange, counts }: {
   active: OtherCatFilter
@@ -680,19 +693,19 @@ function OverviewScreen({ setScreen, setActiveNav, setVerifTab, verifiedEmails, 
 // ─── Inbox ────────────────────────────────────────────────────────────────────
 
 type InboxTab = 'new' | 'bl' | 'others' | 'review'
-const OTHER_CATEGORIES = ['Spam', 'General', 'Invoice', 'SI Request'] as const
-
 function normalizeCat(classifyType: string | undefined): OtherCatFilter {
   if (!classifyType) return 'General'
   if (classifyType === 'Invoice Query') return 'Invoice'
+  // Backward compatibility for browser-saved records from older builds.
+  if (classifyType === 'BL Request') return 'BL Draft Request'
   if (OTHER_CAT_LABELS.slice(1).includes(classifyType as OtherCatFilter)) return classifyType as OtherCatFilter
   return 'General'
 }
 
-function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassifications, deletedEmails, onClassify, onClassifySingle, onVerify, onVerifyAll, setScreen, onSelectEmail, onSelectOthers, onSelectReview }: {
+function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassifications, manualDecisions, deletedEmails, onClassify, onClassifySingle, onVerify, onVerifyAll, setScreen, onSelectEmail, onSelectOthers, onSelectReview }: {
   classifiedEmails: Set<string>; verifiedEmails: Set<string>; readEmails: Set<string>
   reclassifications: Map<string, { classification: Classification; classifyType?: string }>
-  deletedEmails: Set<string>
+  manualDecisions: Map<string, ManualDecision>; deletedEmails: Set<string>
   onClassify: () => void; onClassifySingle: (id: string) => void
   onVerify: (id: string) => void; onVerifyAll: () => void
   setScreen: (s: Screen) => void
@@ -701,19 +714,34 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
   const allEmails = useEmails()
   const [activeInboxTab, setActiveInboxTab] = useState<InboxTab>('new')
   const [othersCatFilter, setOthersCatFilter] = useState<OtherCatFilter>('all')
+  const [inboxQuery, setInboxQuery] = useState('')
+
+  React.useEffect(() => { setInboxQuery('') }, [activeInboxTab])
 
   const effClass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification, classifyType: e.classifyType }
 
   const newIncoming  = allEmails.filter(e => !classifiedEmails.has(e.id) && !deletedEmails.has(e.id)).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
   const othersActive = allEmails.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'ignore' && !readEmails.has(e.id) && !deletedEmails.has(e.id))
-  const blComparison = allEmails.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'check' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id)).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
-  const classifyRev  = allEmails.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'need-review' && !deletedEmails.has(e.id))
+  const blComparison = allEmails.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'check' && effectiveResult(e, manualDecisions) !== 'review' && effectiveResult(e, manualDecisions) !== 'resend' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id)).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
+  // A NEEDS_REVIEW email intentionally appears in BOTH Inbox → Review and
+  // Verification → Review until an employee resolves it.
+  const classifyRev  = allEmails.filter(e => classifiedEmails.has(e.id) && !deletedEmails.has(e.id) && (
+    effClass(e).classification === 'need-review' ||
+    (effClass(e).classification === 'check' && effectiveResult(e, manualDecisions) === 'review')
+  )).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
 
   // Category counts for Others filter bar
-  const otherCatCounts: Record<OtherCatFilter, number> = { all: othersActive.length, Spam: 0, General: 0, Invoice: 0, 'SI Request': 0 }
+  const otherCatCounts: Record<OtherCatFilter, number> = {
+    all: othersActive.length, Spam: 0, General: 0, Invoice: 0, 'SI Request': 0,
+    'BL Draft Request': 0, 'BL Confirmation Request': 0, 'BL Amendment Request': 0,
+  }
   othersActive.forEach(e => { const cat = normalizeCat(effClass(e).classifyType); otherCatCounts[cat] = (otherCatCounts[cat] ?? 0) + 1 })
 
   const visibleOthers = othersCatFilter === 'all' ? othersActive : othersActive.filter(e => normalizeCat(effClass(e).classifyType) === othersCatFilter)
+  const shownNewIncoming = inboxQuery.trim() ? newIncoming.filter(e => emailMatchesQuery(e, inboxQuery)) : newIncoming
+  const shownBLComparison = inboxQuery.trim() ? blComparison.filter(e => emailMatchesQuery(e, inboxQuery)) : blComparison
+  const shownOthers = inboxQuery.trim() ? visibleOthers.filter(e => emailMatchesQuery(e, inboxQuery)) : visibleOthers
+  const shownReview = inboxQuery.trim() ? classifyRev.filter(e => emailMatchesQuery(e, inboxQuery)) : classifyRev
 
   const inboxTabs: { id: InboxTab; label: string; count: number; active: string }[] = [
     { id: 'new',    label: 'New Incoming',  count: newIncoming.length,  active: 'bg-[#EFF6FF] text-[#2563EB] border-[#BFDBFE]' },
@@ -740,6 +768,14 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
       </div>
 
       <div className="px-8 py-7 max-w-[900px]">
+        <div className="mb-5">
+          <SearchBar value={inboxQuery} onChange={setInboxQuery} placeholder={
+            activeInboxTab === 'new' ? 'Search new incoming emails...' :
+            activeInboxTab === 'bl' ? 'Search BL Comparison emails...' :
+            activeInboxTab === 'review' ? 'Search emails to review...' :
+            'Search other emails...'
+          } variant="section" />
+        </div>
 
         {/* NEW INCOMING */}
         {activeInboxTab === 'new' && (
@@ -752,14 +788,14 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                   </button>
                 : null}
             />
-            {newIncoming.length === 0
+            {shownNewIncoming.length === 0
               ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4 flex items-center gap-3">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7l3.5 3.5 4.5-5" stroke="#16A34A" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                  <span className="text-[12.5px] text-[#9CA3AF]">No new incoming emails — all classified</span>
+                  <span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No new incoming emails found for \"${inboxQuery}\"` : 'No new incoming emails — all classified'}</span>
                 </div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-                  {newIncoming.map((email, i) => (
-                    <div key={email.id} className={`email-row-micro flex items-center gap-4 px-5 py-4 ${i < newIncoming.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
+                  {shownNewIncoming.map((email, i) => (
+                    <div key={email.id} className={`email-row-micro flex items-center gap-4 px-5 py-4 ${i < shownNewIncoming.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
                       <div className="flex items-center gap-4 flex-1 min-w-0 cursor-pointer group"
                         onClick={() => { onSelectEmail(email.id); setScreen('inbox-detail') }}>
                         <span className="w-2 h-2 rounded-full bg-[#2563EB] flex-shrink-0" />
@@ -791,11 +827,11 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                 ? <button onClick={onVerifyAll} className="btn-micro text-[12px] font-medium text-[#6B7280] bg-white border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3 py-1.5 rounded-lg transition-colors">Verify All</button>
                 : null}
             />
-            {blComparison.length === 0
-              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No BL Comparison emails awaiting verification</span></div>
+            {shownBLComparison.length === 0
+              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No BL Comparison emails found for \"${inboxQuery}\"` : 'No BL Comparison emails awaiting verification'}</span></div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-                  {blComparison.map((email, i) => (
-                    <div key={email.id} className={`email-row-micro flex items-center gap-4 px-5 py-4 ${i < blComparison.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
+                  {shownBLComparison.map((email, i) => (
+                    <div key={email.id} className={`email-row-micro flex items-center gap-4 px-5 py-4 ${i < shownBLComparison.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
                       <button onClick={() => { onSelectEmail(email.id); setScreen('inbox-detail') }}
                         className="flex-1 min-w-0 flex items-center gap-4 text-left group">
                         <div className="w-8 h-8 rounded-full bg-[#F3F4F6] flex-shrink-0 flex items-center justify-center text-[10px] font-semibold text-[#6B7280]">{email.senderName.slice(0,2).toUpperCase()}</div>
@@ -826,12 +862,12 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
             </div>
             {othersActive.length === 0
               ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No emails in Others queue</span></div>
-              : visibleOthers.length === 0
-                ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No {othersCatFilter} emails</span></div>
+              : shownOthers.length === 0
+                ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No ${othersCatFilter === 'all' ? '' : othersCatFilter + ' '}emails found for \"${inboxQuery}\"` : `No ${othersCatFilter} emails`}</span></div>
                 : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-                    {visibleOthers.map((email, i) => (
+                    {shownOthers.map((email, i) => (
                       <button key={email.id} onClick={() => { onSelectOthers(email.id); setScreen('others-detail') }}
-                        className={`email-row-micro w-full flex items-center gap-4 px-5 py-3.5 text-left group ${i < visibleOthers.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
+                        className={`email-row-micro w-full flex items-center gap-4 px-5 py-3.5 text-left group ${i < shownOthers.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
                         <div className="w-7 h-7 rounded-full bg-[#F3F4F6] flex-shrink-0 flex items-center justify-center text-[10px] font-semibold text-[#9CA3AF]">{email.senderName.slice(0,2).toUpperCase()}</div>
                         <div className="flex-1 min-w-0">
                           <div className="text-[13px] text-[#374151] truncate group-hover:text-[#111827] transition-colors">{email.subject}</div>
@@ -854,12 +890,12 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
         {activeInboxTab === 'review' && (
           <section>
             <SectionHdr label="Review" count={classifyRev.length} />
-            {classifyRev.length === 0
-              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No emails requiring classification review</span></div>
+            {shownReview.length === 0
+              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No review emails found for \"${inboxQuery}\"` : 'No emails requiring review'}</span></div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-                  {classifyRev.map((email, i) => (
+                  {shownReview.map((email, i) => (
                     <button key={email.id} onClick={() => { onSelectReview(email.id); setScreen('manual-review') }}
-                      className={`email-row-micro w-full flex items-center gap-4 px-5 py-4 text-left group ${i < classifyRev.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
+                      className={`email-row-micro w-full flex items-center gap-4 px-5 py-4 text-left group ${i < shownReview.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
                       <div className="w-8 h-8 rounded-full bg-[#FEF3C7] flex-shrink-0 flex items-center justify-center text-[10px] font-semibold text-[#D97706]">{email.senderName.slice(0,2).toUpperCase()}</div>
                       <div className="flex-1 min-w-0">
                         <div className="text-[13px] font-medium text-[#374151] truncate">{email.subject}</div>
@@ -867,7 +903,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                       </div>
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
                         <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#D97706] bg-[#FFFBEB] px-2 py-0.5 rounded-full"><span className="w-1.5 h-1.5 rounded-full bg-[#D97706]" />Review</span>
-                        <span className="text-[10.5px] text-[#D97706] opacity-70">Fail to Identify Type</span>
+                        <span className="text-[10.5px] text-[#D97706] opacity-70">{getReviewReason(email)}</span>
                       </div>
                       <span className="text-[#D1D5DB] group-hover:text-[#D97706] transition-colors"><Chevron /></span>
                     </button>
@@ -889,10 +925,12 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
   setActiveNav: (n: NavItem) => void; setVerifTab: (t: VerifTab) => void
 }) {
   const allEmails = useEmails()
+  const [previewRole, setPreviewRole] = useState<AttachmentRole | null>(null)
   const email = emailId ? allEmails.find(e => e.id === emailId) : null
   if (!email) return null
   const isClassified = classifiedEmails.has(email.id)
   const isBL = email.classification === 'check'
+  const previewFile = previewRole ? email.attachments?.[previewRole] : undefined
 
   function handleVerify() {
     onVerify(email!.id)
@@ -901,6 +939,11 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
 
   return (
     <div className="flex-1 overflow-y-auto">
+      {previewRole && previewFile && (
+        <AttachmentPreview key={previewRole} emailId={email.id} role={previewRole} file={previewFile}
+          label={ATTACHMENT_CARDS.find(c => c.role === previewRole)?.label ?? previewRole}
+          onClose={() => setPreviewRole(null)} />
+      )}
       <TopBar title="Email Detail" />
       <div className="px-8 py-7 max-w-[860px]">
         <BackBtn onClick={() => setScreen('inbox')} label="Back to Inbox" />
@@ -923,13 +966,20 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
           {isBL && (
             <div className="px-7 py-5 border-b border-[#F0EEE9]">
               <div className="text-[11px] font-semibold text-[#9CA3AF] uppercase tracking-wide mb-3">Attached Documents</div>
-              <div className="flex gap-3">
-                {[{ type: 'SI', size: '184 KB' }, { type: 'BL', size: '211 KB' }].map(doc => (
-                  <div key={doc.type} className="flex items-center gap-3 border border-[#E8E6E1] rounded-lg px-4 py-3 hover:bg-[#FAFAF9] cursor-pointer">
-                    <div className="w-8 h-8 rounded-md bg-[#EFF6FF] flex items-center justify-center text-[10px] font-bold text-[#2563EB]">{doc.type}</div>
-                    <div><div className="text-[12px] font-medium text-[#111827]">{doc.type === 'SI' ? 'Shipping_Instruction' : 'Bill_of_Lading'}_{email.id}.pdf</div><div className="text-[11px] text-[#9CA3AF]">{doc.size} · PDF</div></div>
-                  </div>
-                ))}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {ATTACHMENT_CARDS.map(doc => {
+                  const file = email.attachments?.[doc.role]
+                  return (
+                    <button key={doc.role} disabled={!file} onClick={() => { if (file) setPreviewRole(doc.role) }}
+                      className={`flex items-center gap-3 border rounded-lg px-4 py-3 text-left transition-colors ${file ? 'border-[#E8E6E1] hover:bg-[#FAFAF9]' : 'border-[#F0EEE9] bg-[#FAFAF9] cursor-default'}`}>
+                      <div className="w-8 h-8 rounded-md bg-[#EFF6FF] flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-[#2563EB]">{doc.role}</div>
+                      <div className="min-w-0">
+                        <div className="text-[12px] font-medium text-[#111827] truncate">{file?.filename ?? doc.label}</div>
+                        <div className="text-[11px] text-[#9CA3AF]">{file ? `${file.extension.toUpperCase()} · Click to preview` : `No ${doc.role} attachment`}</div>
+                      </div>
+                    </button>
+                  )
+                })}
               </div>
             </div>
           )}
@@ -1049,19 +1099,20 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
   const effClass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification }
 
   const verified = allEmails.filter(e => verifiedEmails.has(e.id) && !deletedEmails.has(e.id))
-  const reviewEmails = [
-    ...verified.filter(e => effectiveResult(e, manualDecisions) === 'review'),
-    ...allEmails.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'need-review' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id)),
-  ].sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
+  const reviewEmails = allEmails.filter(e => classifiedEmails.has(e.id) && !deletedEmails.has(e.id) && (
+    effClass(e).classification === 'need-review' ||
+    (effClass(e).classification === 'check' && effectiveResult(e, manualDecisions) === 'review')
+  )).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
 
   const matchEmails = verified.filter(e => effectiveResult(e, manualDecisions) === 'match')
   const mismatchEmails = verified.filter(e => effectiveResult(e, manualDecisions) === 'mismatch').sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
-  const allVerifEmails = [...verified, ...allEmails.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'need-review' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id))]
-    .sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
+  const allVerifMap = new Map<string, Email>()
+  ;[...verified, ...reviewEmails].forEach(e => allVerifMap.set(e.id, e))
+  const allVerifEmails = [...allVerifMap.values()].sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
 
   // Match reply ordering: unreplied first (latest→oldest), then replied (latest→oldest)
-  const unrepliedMatch = matchEmails.filter(e => !repliedEmails.has(e.id)).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
-  const repliedMatch   = matchEmails.filter(e =>  repliedEmails.has(e.id)).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
+  const unrepliedMatch = matchEmails.filter(e => !hasReply(e, repliedEmails)).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
+  const repliedMatch   = matchEmails.filter(e =>  hasReply(e, repliedEmails)).sort((a, b) => receivedSortKey(b.received) - receivedSortKey(a.received))
   const matchAllOrdered = [...unrepliedMatch, ...repliedMatch]
 
   let baseFiltered: Email[]
@@ -1182,15 +1233,15 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
                 const isClassifyReviewOnly = email.classification === 'need-review' && !verifiedEmails.has(email.id)
                 const isSelected = selectedForDelete.has(email.id)
                 const isMatch = eff === 'match'
-                const isReplied = repliedEmails.has(email.id)
+                const isReplied = hasReply(email, repliedEmails)
 
                 return (
                   <div key={email.id}
                     onClick={() => {
                       if (deleteMode) { toggleSelect(email.id); return }
                       const isKeepReview = manualDecisions.get(email.id) === 'keep-review'
-                      if (isClassifyReviewOnly) { onSelectReview(email.id); setScreen('manual-review') }
-                      else if (isKeepReview) { onSelectKeepReview(email.id); setScreen('manual-review') }
+                      if (isKeepReview) { onSelectKeepReview(email.id); setScreen('manual-review') }
+                      else if (disp === 'review' || isClassifyReviewOnly) { onSelectReview(email.id); setScreen('manual-review') }
                       else { onSelectEmail(email.id); setScreen('verification-detail') }
                     }}
                     className={`email-row-micro w-full grid items-center px-6 py-4 cursor-pointer group transition-all ${
@@ -1229,7 +1280,7 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
                       <Badge result={disp} />
                     </div>
                     <span className="text-[11.5px] text-[#9CA3AF]">
-                      {email.autoReply?.action === 'SENT'
+                      {(email.autoReply?.action === 'SENT' || email.autoReply?.action === 'ALREADY_SENT')
                         ? <span className="inline-flex items-center gap-1 text-[#16A34A] font-medium">
                             <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 7.5l2.5 2.5L11 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
                             Sent
@@ -1598,9 +1649,14 @@ function ManualReviewScreen({ emailId, setScreen, backTo, reviewMode = 'classify
 
   // ── Direct-verify mode ──────────────────────────────────────────────────────
   if (reviewMode === 'direct-verify') {
-    const hasAttachment = email.fields.length > 0
+    const hasAttachment = Boolean(email.attachments?.SI || email.attachments?.BL)
     return (
       <div className="flex-1 overflow-y-auto">
+        {previewRole && previewFile && (
+          <AttachmentPreview key={previewRole} emailId={email.id} role={previewRole} file={previewFile}
+            label={ATTACHMENT_CARDS.find(c => c.role === previewRole)?.label ?? previewRole}
+            onClose={() => setPreviewRole(null)} />
+        )}
         <TopBar title="Manual Review" subtitle="Inspect attachment and decide" />
         <div className="px-8 py-7 max-w-[860px]">
           <BackBtn onClick={() => setScreen(resolvedBackTo)} label="Back" />
@@ -1614,16 +1670,22 @@ function ManualReviewScreen({ emailId, setScreen, backTo, reviewMode = 'classify
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF] mb-3">Attachment</div>
                 {hasAttachment ? (
                   <div className="border border-[#E8E6E1] rounded-xl overflow-hidden">
-                    <div className="flex items-center gap-3 px-4 py-3 border-b border-[#F0EEE9] hover:bg-[#FAFAF9] cursor-pointer">
-                      <div className="w-8 h-8 rounded-md bg-[#EFF6FF] flex items-center justify-center text-[9px] font-bold text-[#2563EB]">SI</div>
-                      <div className="flex-1"><div className="text-[12px] font-medium text-[#111827]">Shipping_Instruction_{email.id}.pdf</div><div className="text-[11px] text-[#9CA3AF]">Contains SI · 184 KB · PDF</div></div>
-                      <button className="btn-micro text-[11px] text-[#2563EB] border border-[#BFDBFE] px-2 py-1 rounded-lg hover:bg-[#EFF6FF] transition-colors">Open</button>
-                    </div>
-                    <div className="flex items-center gap-3 px-4 py-3 hover:bg-[#FAFAF9] cursor-pointer">
-                      <div className="w-8 h-8 rounded-md bg-[#EFF6FF] flex items-center justify-center text-[9px] font-bold text-[#2563EB]">BL</div>
-                      <div className="flex-1"><div className="text-[12px] font-medium text-[#111827]">Bill_of_Lading_{email.id}.pdf</div><div className="text-[11px] text-[#9CA3AF]">Contains BL · 211 KB · PDF</div></div>
-                      <button className="btn-micro text-[11px] text-[#2563EB] border border-[#BFDBFE] px-2 py-1 rounded-lg hover:bg-[#EFF6FF] transition-colors">Open</button>
-                    </div>
+                    {ATTACHMENT_CARDS.map((doc, index) => {
+                      const file = email.attachments?.[doc.role]
+                      return (
+                        <div key={doc.role}
+                          className={`flex items-center gap-3 px-4 py-3 hover:bg-[#FAFAF9] ${index < ATTACHMENT_CARDS.length - 1 ? 'border-b border-[#F0EEE9]' : ''} ${file ? 'cursor-pointer' : ''}`}
+                          onClick={() => { if (file) setPreviewRole(doc.role) }}>
+                          <div className="w-8 h-8 rounded-md bg-[#EFF6FF] flex items-center justify-center text-[9px] font-bold text-[#2563EB]">{doc.role}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[12px] font-medium text-[#111827] truncate">{file?.filename ?? doc.label}</div>
+                            <div className="text-[11px] text-[#9CA3AF]">{file ? `${doc.label} · ${file.extension.toUpperCase()}` : `No ${doc.role} attachment`}</div>
+                          </div>
+                          <button disabled={!file} onClick={e => { e.stopPropagation(); if (file) setPreviewRole(doc.role) }}
+                            className={`btn-micro text-[11px] border px-2 py-1 rounded-lg transition-colors ${file ? 'text-[#2563EB] border-[#BFDBFE] hover:bg-[#EFF6FF]' : 'text-[#9CA3AF] border-[#E8E6E1] cursor-default'}`}>Open</button>
+                        </div>
+                      )
+                    })}
                   </div>
                 ) : (
                   <div className="border border-[#E8E6E1] rounded-xl px-5 py-5 flex items-center gap-3 bg-[#FAFAF9]">
@@ -1680,18 +1742,26 @@ function ManualReviewScreen({ emailId, setScreen, backTo, reviewMode = 'classify
                 <p className="mb-2">The attached documents and email content do not match any known classification pattern.</p>
                 <p>Please manually inspect this email and determine the appropriate workflow.</p>
               </div>
-              {/* Unified attachment panel */}
+              {/* Unified attachment panel — always show the real files that arrived. */}
               <div className="mt-5 pt-5 border-t border-[#F0EEE9]">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF] mb-3">Attachment</div>
                 <div className="border border-[#E8E6E1] rounded-xl overflow-hidden">
-                  <div className="flex items-center gap-3 px-4 py-3 hover:bg-[#FAFAF9] cursor-pointer border-b border-[#F0EEE9] last:border-b-0">
-                    <div className="w-8 h-8 rounded-md bg-[#F3F4F6] flex items-center justify-center text-[10px] font-bold text-[#6B7280]">?</div>
-                    <div className="flex-1">
-                      <div className="text-[12px] font-medium text-[#111827]">Attachment_{email.id}.pdf</div>
-                      <div className="text-[11px] text-[#9CA3AF]">Unknown type · PDF</div>
-                    </div>
-                    <button className="btn-micro text-[11px] text-[#2563EB] border border-[#BFDBFE] px-2 py-1 rounded-lg hover:bg-[#EFF6FF] transition-colors">Open</button>
-                  </div>
+                  {ATTACHMENT_CARDS.map((doc, index) => {
+                    const file = email.attachments?.[doc.role]
+                    return (
+                      <div key={doc.role}
+                        className={`flex items-center gap-3 px-4 py-3 hover:bg-[#FAFAF9] ${index < ATTACHMENT_CARDS.length - 1 ? 'border-b border-[#F0EEE9]' : ''} ${file ? 'cursor-pointer' : ''}`}
+                        onClick={() => { if (file) setPreviewRole(doc.role) }}>
+                        <div className="w-8 h-8 rounded-md bg-[#F3F4F6] flex items-center justify-center text-[10px] font-bold text-[#6B7280]">{doc.role}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[12px] font-medium text-[#111827] truncate">{file?.filename ?? doc.label}</div>
+                          <div className="text-[11px] text-[#9CA3AF]">{file ? `${doc.label} · ${file.extension.toUpperCase()}` : `No ${doc.role} attachment`}</div>
+                        </div>
+                        <button disabled={!file} onClick={e => { e.stopPropagation(); if (file) setPreviewRole(doc.role) }}
+                          className={`btn-micro text-[11px] border px-2 py-1 rounded-lg transition-colors ${file ? 'text-[#2563EB] border-[#BFDBFE] hover:bg-[#EFF6FF]' : 'text-[#9CA3AF] border-[#E8E6E1] cursor-default'}`}>Open</button>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             </div>
@@ -1886,8 +1956,8 @@ function FinalDecisionScreen({ emailId, setScreen, setActiveNav, setVerifTab, on
     else { setVerifTab('review'); setActiveNav('verification'); setScreen('verification') }
   }
 
-  const hasAttachment = email.fields.length > 0
-  const showMatch = reviewMode !== 'direct-verify' || hasAttachment
+  const hasComparablePair = Boolean(email.attachments?.SI && email.attachments?.BL)
+  const showMatch = reviewMode !== 'direct-verify' || hasComparablePair
 
   const allOptions: { decision: ManualDecision; label: string; desc: string; style: string }[] = [
     { decision: 'match',       label: 'Match',          desc: 'You have manually verified and confirmed SI and BL information matches.', style: 'border-[#BBF7D0] text-[#16A34A] bg-[#F0FDF4] hover:bg-[#DCFCE7]' },
@@ -1972,9 +2042,9 @@ function gmailComposeUrl(email: Email): string {
   return `https://mail.google.com/mail/?${params.toString()}`
 }
 
-function ResendScreen({ manualDecisions, resentEmails, deletedEmails, setScreen, onSelectEmail, onResend }: {
+function ResendScreen({ manualDecisions, resentEmails, deletedEmails, setScreen, onSelectEmail, onViewDocuments, onResend }: {
   manualDecisions: Map<string, ManualDecision>; resentEmails: Set<string>; deletedEmails: Set<string>
-  setScreen: (s: Screen) => void; onSelectEmail: (id: string) => void; onResend: (id: string) => void
+  setScreen: (s: Screen) => void; onSelectEmail: (id: string) => void; onViewDocuments: (id: string) => void; onResend: (id: string) => void
 }) {
   const allEmails = useEmails()
   const [query, setQuery] = useState('')
@@ -2035,7 +2105,7 @@ function ResendScreen({ manualDecisions, resentEmails, deletedEmails, setScreen,
                       )}
                       <div className="px-6 py-4 flex items-center gap-3">
                         <button onClick={() => { onSelectEmail(email.id); setScreen('verification-detail') }} className="btn-micro text-[12.5px] text-[#6B7280] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3.5 py-1.5 rounded-lg font-medium">Open Email</button>
-                        <button onClick={() => { onSelectEmail(email.id); setScreen('manual-review') }} className="btn-micro text-[12.5px] text-[#6B7280] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3.5 py-1.5 rounded-lg font-medium">View Documents</button>
+                        <button onClick={() => onViewDocuments(email.id)} className="btn-micro text-[12.5px] text-[#6B7280] border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3.5 py-1.5 rounded-lg font-medium">View Documents</button>
                         <button onClick={() => {
                           window.open(gmailComposeUrl(email), '_blank', 'noopener,noreferrer')
                           onResend(email.id)
@@ -2113,7 +2183,8 @@ function toEmail(result: ApiResult, subject: string, sender: string, body: strin
 
 // A sample-inbox email from GET /api/emails.
 function fromRecord(record: ApiEmailRecord): Email {
-  const isBL = record.category === 'BL_COMPARISON'
+  const isBLRequest = record.workflowType === 'BL_REQUEST'
+  const isBLComparison = record.workflowType === 'BL_COMPARISON' || (record.category === 'BL_COMPARISON' && !isBLRequest)
 
   return {
     id: record.id,
@@ -2122,13 +2193,20 @@ function fromRecord(record: ApiEmailRecord): Email {
     sender: record.sender,
     received: record.received,
     docType: record.docType,
+    workflowType: record.workflowType,
+    workflowSubtype: record.workflowSubtype ?? undefined,
+    source: record.source,
     docResult: docResultFor(record.status),
     reviewDetail: reviewDetailFor(record.reviewReason),
-    classification: isBL ? 'check' : 'ignore',
-    classifyType: isBL ? 'BL Comparison' : CATEGORY_LABELS[record.category] ?? record.docType,
+    // The benchmark keeps draft-BL requests under BL_COMPARISON, but the UI
+    // must not send them into the SI-vs-BL verification workflow because
+    // there are no two documents to compare.
+    classification: isBLComparison ? 'check' : 'ignore',
+    classifyType: isBLRequest ? (record.workflowSubtype ?? record.docType ?? 'BL Draft Request') : isBLComparison ? 'BL Comparison' : CATEGORY_LABELS[record.category] ?? record.docType,
     body: record.body,
     fields: labelFields(record.fields),
     attachments: record.attachments ?? {},
+    autoReply: record.autoReply,
   }
 }
 
@@ -2335,6 +2413,9 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [otherDocFilter, setOtherDocFilter] = useState<OtherCatFilter>('all')
   const [docSection, setDocSection] = useState<'bl' | 'other'>('bl')
+  const [documentQuery, setDocumentQuery] = useState('')
+
+  React.useEffect(() => { setDocumentQuery('') }, [docSection])
 
   React.useEffect(() => { if (!deleteMode) setSelectedForDelete(new Set()) }, [deleteMode])
 
@@ -2371,7 +2452,7 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
     .sort((a, b) => docSort(otherSortPriority(a), otherSortPriority(b), a, b))
 
   // Other category counts
-  const otherCatCounts: Record<OtherCatFilter, number> = { all: otherSection.length, Spam: 0, General: 0, Invoice: 0, 'SI Request': 0 }
+  const otherCatCounts: Record<OtherCatFilter, number> = { all: otherSection.length, Spam: 0, General: 0, Invoice: 0, 'SI Request': 0, 'BL Draft Request': 0, 'BL Confirmation Request': 0, 'BL Amendment Request': 0 }
   otherSection.forEach(e => {
     if (classifiedEmails.has(e.id) && effClass(e).classification === 'ignore') {
       const cat = normalizeCat(effClass(e).classifyType)
@@ -2382,6 +2463,9 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
   const visibleOtherSection = otherDocFilter === 'all'
     ? otherSection
     : otherSection.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'ignore' && normalizeCat(effClass(e).classifyType) === otherDocFilter)
+
+  const shownBLSection = documentQuery.trim() ? blSection.filter(e => emailMatchesQuery(e, documentQuery)) : blSection
+  const shownOtherSection = documentQuery.trim() ? visibleOtherSection.filter(e => emailMatchesQuery(e, documentQuery)) : visibleOtherSection
 
   function getBLStatus(e: Email): { label: string; badge: string; dot: string } {
     if (!verifiedEmails.has(e.id) && !classifiedEmails.has(e.id)) return { label: 'New', badge: 'bg-[#EFF6FF] text-[#2563EB]', dot: 'bg-[#2563EB]' }
@@ -2401,8 +2485,16 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
   function handleBLClick(e: Email) {
     if (deleteMode) { toggleSelect(e.id); return }
     onSelectEmail(e.id)
-    if (!verifiedEmails.has(e.id)) { setScreen('inbox-detail') }
-    else { setActiveNav('verification'); setVerifTab(effectiveResult(e, manualDecisions) === 'mismatch' ? 'mismatch' : effectiveResult(e, manualDecisions) === 'review' ? 'review' : 'match'); setScreen('verification-detail') }
+    if (!verifiedEmails.has(e.id) && e.docResult === 'review') {
+      onSelectReview(e.id)
+      setScreen('manual-review')
+    } else if (!verifiedEmails.has(e.id)) {
+      setScreen('inbox-detail')
+    } else {
+      setActiveNav('verification')
+      setVerifTab(effectiveResult(e, manualDecisions) === 'mismatch' ? 'mismatch' : effectiveResult(e, manualDecisions) === 'review' ? 'review' : 'match')
+      setScreen('verification-detail')
+    }
   }
 
   function handleOtherClick(e: Email) {
@@ -2421,7 +2513,7 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
     onDeleteEmails([...selectedForDelete]); setDeleteMode(false); setShowDeleteConfirm(false)
   }
 
-  const allVisible = [...blSection, ...otherSection]
+  const allVisible = docSection === 'bl' ? shownBLSection : shownOtherSection
 
   const deleteBtn = (
     <div className="flex items-center gap-2">
@@ -2501,20 +2593,31 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
           })}
         </div>
 
+        <div className="mb-5">
+          <SearchBar value={documentQuery} onChange={setDocumentQuery}
+            placeholder={docSection === 'bl' ? 'Search BL Comparison documents...' : 'Search other documents...'}
+            variant="section" />
+        </div>
+
         {/* Section 1: BL Comparison */}
         {docSection === 'bl' && <section>
           <SectionHdr label="BL Comparison" count={blSection.length} />
-          {blSection.length === 0
-            ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No BL Comparison documents</span></div>
+          {shownBLSection.length === 0
+            ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{documentQuery.trim() ? `No BL Comparison documents found for \"${documentQuery}\"` : 'No BL Comparison documents'}</span></div>
             : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-                {blSection.map((email, i) => {
+                {shownBLSection.map((email, i) => {
                   const status = getBLStatus(email)
                   const isBLPending = classifiedEmails.has(email.id) && !verifiedEmails.has(email.id)
-                  const action = isBLPending ? (
+                  const action = isBLPending && email.docResult === 'review' ? (
+                    <button onClick={e => { e.stopPropagation(); onSelectReview(email.id); setScreen('manual-review') }}
+                      className="btn-micro flex items-center gap-1.5 text-[12px] font-medium text-[#D97706] border border-[#FDE68A] bg-white hover:bg-[#FFFBEB] px-3 py-1.5 rounded-lg transition-colors flex-shrink-0">
+                      Review
+                    </button>
+                  ) : isBLPending ? (
                     <DocVerifyBtn onClick={() => {
                       onVerify(email.id)
                       setActiveNav('verification')
-                      setVerifTab(email.docResult === 'mismatch' ? 'mismatch' : email.docResult === 'review' ? 'review' : 'match')
+                      setVerifTab(email.docResult === 'mismatch' ? 'mismatch' : 'match')
                       setScreen('verification-detail')
                     }} />
                   ) : !classifiedEmails.has(email.id) ? (
@@ -2525,7 +2628,7 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
                     </button>
                   ) : undefined
                   return (
-                    <div key={email.id} className={i < blSection.length - 1 ? 'border-b border-[#F0EEE9]' : ''}>
+                    <div key={email.id} className={i < shownBLSection.length - 1 ? 'border-b border-[#F0EEE9]' : ''}>
                       <EmailRow email={email} status={status} onClick={() => handleBLClick(email)} action={action} isSelected={selectedForDelete.has(email.id)} />
                     </div>
                   )
@@ -2542,10 +2645,10 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
           </div>
           {otherSection.length === 0
             ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No other documents</span></div>
-            : visibleOtherSection.length === 0
-              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No {otherDocFilter} emails</span></div>
+            : shownOtherSection.length === 0
+              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{documentQuery.trim() ? `No ${otherDocFilter === 'all' ? '' : otherDocFilter + ' '}documents found for \"${documentQuery}\"` : `No ${otherDocFilter} emails`}</span></div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
-                  {visibleOtherSection.map((email, i) => {
+                  {shownOtherSection.map((email, i) => {
                     const status = getOtherStatus(email)
                     const isNew = !classifiedEmails.has(email.id)
                     const action = isNew ? (
@@ -2556,7 +2659,7 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
                       </button>
                     ) : undefined
                     return (
-                      <div key={email.id} className={i < visibleOtherSection.length - 1 ? 'border-b border-[#F0EEE9]' : ''}>
+                      <div key={email.id} className={i < shownOtherSection.length - 1 ? 'border-b border-[#F0EEE9]' : ''}>
                         <EmailRow email={email} status={status} onClick={() => handleOtherClick(email)} action={action} isSelected={selectedForDelete.has(email.id)} />
                       </div>
                     )
@@ -2583,13 +2686,29 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
 
   // The pipeline has already classified every email and compared every SI + BL pair.
   const [classifiedEmails, setClassifiedEmails] = useState<Set<string>>(new Set(initialEmails.map(e => e.id)))
-  const [verifiedEmails, setVerifiedEmails]     = useState<Set<string>>(new Set(initialEmails.filter(e => e.classification === 'check').map(e => e.id)))
+  const [verifiedEmails, setVerifiedEmails]     = useState<Set<string>>(new Set(initialEmails.filter(e => e.classification === 'check' && Boolean(e.autoReply)).map(e => e.id)))
   const [readEmails, setReadEmails]             = useState<Set<string>>(new Set())
   const [manualDecisions, setManualDecisions]   = useState<Map<string, ManualDecision>>(new Map())
   const [resentEmails, setResentEmails]           = useState<Set<string>>(new Set())
   const [reclassifications, setReclassifications] = useState<Map<string, { classification: Classification; classifyType?: string }>>(new Map())
   const [deletedEmails, setDeletedEmails]       = useState<Set<string>>(new Set())
   const [repliedEmails, setRepliedEmails]       = useState<Set<string>>(new Set())
+
+  // GET /api/emails is refreshed in the background so a customer message
+  // collected by Gmail Receiver appears without reloading the page.  Merge new
+  // backend records into the workspace while preserving local workflow state.
+  useEffect(() => {
+    setAllEmails(prev => {
+      const next = new Map(prev.map(email => [email.id, email]))
+      initialEmails.forEach(email => next.set(email.id, { ...next.get(email.id), ...email }))
+      return [...next.values()]
+    })
+    setClassifiedEmails(prev => new Set([...prev, ...initialEmails.map(email => email.id)]))
+    setVerifiedEmails(prev => new Set([
+      ...prev,
+      ...initialEmails.filter(email => email.classification === 'check' && Boolean(email.autoReply)).map(email => email.id),
+    ]))
+  }, [initialEmails])
 
   function handleSetScreen(s: Screen) {
     setScreen(s)
@@ -2627,7 +2746,7 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
     setClassifiedEmails(prev => new Set([...prev, id]))
   }
 
-  function handleVerify(id: string, from: 'inbox' | 'documents' = 'inbox') {
+  async function handleVerify(id: string, from: 'inbox' | 'documents' = 'inbox') {
     const email = allEmails.find(e => e.id === id)!
     // Emails originally "Fail to Identify Type" (need-review) that were manually classified
     // as BL Comparison must go to Manual Review — we cannot run automatic comparison.
@@ -2640,7 +2759,25 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
       setScreen('manual-review')
       setActiveNav('verification')
     } else {
-      // Normal system-classified BL Comparison → run automatic SI-vs-BL comparison
+      // Confirm the exported sample result in the backend. This is the workflow
+      // event that triggers MATCH Auto Reply or queues a MISMATCH draft.
+      try {
+        const result = await verifyEmail(id)
+        setAllEmails(prev => prev.map(item => item.id === id ? {
+          ...item,
+          docResult: docResultFor(result.status),
+          reviewDetail: reviewDetailFor(result.review_reason),
+          fields: labelFields(result.fields),
+          autoReply: result.auto_reply,
+        } : item))
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'Auto Reply verification failed.'
+        setAllEmails(prev => prev.map(item => item.id === id ? {
+          ...item,
+          autoReply: { ok: false, email_id: id, status: item.docResult, action: 'ERROR', reason },
+        } : item))
+      }
+
       setVerifiedEmails(prev => new Set([...prev, id]))
       setSelectedEmailId(id)
       setVerifTab(email.docResult === 'review' ? 'review' : email.docResult === 'mismatch' ? 'mismatch' : 'match')
@@ -2649,10 +2786,30 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
     }
   }
 
-  function handleVerifyAll() {
+  async function handleVerifyAll() {
     const effR = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification }
-    const ids = allEmails.filter(e => classifiedEmails.has(e.id) && effR(e).classification === 'check' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id)).map(e => e.id)
-    if (ids.length > 0) setVerifiedEmails(prev => new Set([...prev, ...ids]))
+    const ids = allEmails.filter(e => classifiedEmails.has(e.id) && effR(e).classification === 'check' && e.docResult !== 'review' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id)).map(e => e.id)
+
+    // Verify sequentially so bulk actions do not hammer SMTP or the backend.
+    for (const id of ids) {
+      try {
+        const result = await verifyEmail(id)
+        setAllEmails(prev => prev.map(item => item.id === id ? {
+          ...item,
+          docResult: docResultFor(result.status),
+          reviewDetail: reviewDetailFor(result.review_reason),
+          fields: labelFields(result.fields),
+          autoReply: result.auto_reply,
+        } : item))
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'Auto Reply verification failed.'
+        setAllEmails(prev => prev.map(item => item.id === id ? {
+          ...item,
+          autoReply: { ok: false, email_id: id, status: item.docResult, action: 'ERROR', reason },
+        } : item))
+      }
+      setVerifiedEmails(prev => new Set([...prev, id]))
+    }
   }
 
   function handleDecision(id: string, d: ManualDecision) {
@@ -2706,15 +2863,15 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
   function handleReplyAll() {
     const effR = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification }
     const matchIds = allEmails
-      .filter(e => verifiedEmails.has(e.id) && !deletedEmails.has(e.id) && effectiveResult(e, manualDecisions) === 'match' && !repliedEmails.has(e.id))
+      .filter(e => verifiedEmails.has(e.id) && !deletedEmails.has(e.id) && effectiveResult(e, manualDecisions) === 'match' && !hasReply(e, repliedEmails))
       .map(e => e.id)
     setRepliedEmails(prev => new Set([...prev, ...matchIds]))
   }
 
   const effReclass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification, classifyType: e.classifyType }
   const newIncoming  = allEmails.filter(e => !classifiedEmails.has(e.id) && !deletedEmails.has(e.id)).length
-  const blPending    = allEmails.filter(e => classifiedEmails.has(e.id) && effReclass(e).classification === 'check' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id)).length
-  const classifyRev  = allEmails.filter(e => classifiedEmails.has(e.id) && effReclass(e).classification === 'need-review' && !deletedEmails.has(e.id)).length
+  const blPending    = allEmails.filter(e => classifiedEmails.has(e.id) && effReclass(e).classification === 'check' && effectiveResult(e, manualDecisions) !== 'review' && effectiveResult(e, manualDecisions) !== 'resend' && !verifiedEmails.has(e.id) && !deletedEmails.has(e.id)).length
+  const classifyRev  = allEmails.filter(e => classifiedEmails.has(e.id) && !deletedEmails.has(e.id) && (effReclass(e).classification === 'need-review' || (effReclass(e).classification === 'check' && effectiveResult(e, manualDecisions) === 'review'))).length
   const inboxBadge   = newIncoming + blPending + classifyRev
 
   return (
@@ -2731,12 +2888,12 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
         )}
         {screen === 'inbox' && (
           <InboxScreen classifiedEmails={classifiedEmails} verifiedEmails={verifiedEmails} readEmails={readEmails}
-            reclassifications={reclassifications} deletedEmails={deletedEmails}
+            reclassifications={reclassifications} manualDecisions={manualDecisions} deletedEmails={deletedEmails}
             onClassify={handleClassify} onClassifySingle={handleClassifySingle}
             onVerify={handleVerify} onVerifyAll={handleVerifyAll}
             setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId}
             onSelectOthers={setSelectedEmailId}
-            onSelectReview={(id) => { setReviewEmailId(id); setSelectedEmailId(id); setReviewBackTo('inbox'); setReviewMode('classify') }} />
+            onSelectReview={(id) => { const item = allEmails.find(e => e.id === id); setReviewEmailId(id); setSelectedEmailId(id); setReviewBackTo('inbox'); setReviewMode(item?.classification === 'check' && item.docResult === 'review' ? 'direct-verify' : 'classify') }} />
         )}
         {screen === 'inbox-detail' && (
           <InboxDetailScreen emailId={selectedEmailId} classifiedEmails={classifiedEmails}
@@ -2753,7 +2910,7 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
             reclassifications={reclassifications} manualDecisions={manualDecisions} deletedEmails={deletedEmails}
             setScreen={handleSetScreen} setActiveNav={setActiveNav} setVerifTab={setVerifTab}
             onSelectEmail={setSelectedEmailId} onSelectOthers={setSelectedEmailId}
-            onSelectReview={(id) => { setReviewEmailId(id); setSelectedEmailId(id); setReviewBackTo('documents'); setReviewMode('classify') }}
+            onSelectReview={(id) => { const item = allEmails.find(e => e.id === id); setReviewEmailId(id); setSelectedEmailId(id); setReviewBackTo('documents'); setReviewMode(item?.classification === 'check' && item.docResult === 'review' ? 'direct-verify' : 'classify') }}
             onVerify={(id) => handleVerify(id, 'documents')} onClassifySingle={handleClassifySingle}
             onDeleteEmails={handleDeleteEmails} />
         )}
@@ -2763,7 +2920,7 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
             deletedEmails={deletedEmails} repliedEmails={repliedEmails}
             activeTab={verifTab} setActiveTab={setVerifTab}
             setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId}
-            onSelectReview={(id) => { setReviewEmailId(id); setSelectedEmailId(id); setReviewBackTo('verification'); setReviewMode('classify') }}
+            onSelectReview={(id) => { const item = allEmails.find(e => e.id === id); setReviewEmailId(id); setSelectedEmailId(id); setReviewBackTo('verification'); setReviewMode(item?.classification === 'check' && item.docResult === 'review' ? 'direct-verify' : 'classify') }}
             onSelectKeepReview={(id) => handleSelectKeepReview(id, 'verification')}
             onDeleteEmails={handleDeleteEmails} onReply={handleReply} onReplyAll={handleReplyAll} />
         )}
@@ -2784,7 +2941,16 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
         )}
         {screen === 'resend' && (
           <ResendScreen manualDecisions={manualDecisions} resentEmails={resentEmails} deletedEmails={deletedEmails}
-            setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId} onResend={handleResend} />
+            setScreen={handleSetScreen} onSelectEmail={setSelectedEmailId}
+            onViewDocuments={(id) => {
+              setReviewEmailId(id)
+              setSelectedEmailId(id)
+              setReviewBackTo('resend')
+              setReviewMode('flag-review')
+              setScreen('manual-review')
+              setActiveNav('resend')
+            }}
+            onResend={handleResend} />
         )}
         {screen === 'live-check' && <LiveCheckScreen onSave={handleSaveLive} onView={handleViewSaved} />}
       </main>
@@ -2818,12 +2984,19 @@ export default function App() {
     // Free hosting sleeps when idle, so the first request can take a while.
     const timer = setTimeout(() => setSlow(true), 6000)
 
-    fetchEmails()
-      .then(loaded => { if (!cancelled) setRecords(loaded) })
-      .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Something went wrong.') })
-      .finally(() => clearTimeout(timer))
+    const load = (initial: boolean) => fetchEmails()
+      .then(loaded => { if (!cancelled) { setRecords(loaded); if (initial) setError(null) } })
+      .catch(err => {
+        // A transient background-poll failure should not blank an already
+        // loaded workspace.  Initial-load errors still get the retry screen.
+        if (!cancelled && initial) setError(err instanceof Error ? err.message : 'Something went wrong.')
+      })
+      .finally(() => { if (initial) clearTimeout(timer) })
 
-    return () => { cancelled = true; clearTimeout(timer) }
+    load(true)
+    const poll = window.setInterval(() => load(false), 10000)
+
+    return () => { cancelled = true; clearTimeout(timer); window.clearInterval(poll) }
   }, [attempt])
 
   function retry() {

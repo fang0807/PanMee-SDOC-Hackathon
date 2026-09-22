@@ -29,6 +29,38 @@ DOC_TYPES = {
     "SPAM": "Spam",
 }
 
+BL_AMENDMENT_RE = re.compile(
+    r"\b(amend|amendment|revise|revision|correct|correction)\b.*\bBL\b|\bBL\b.*\b(amend|amendment|revise|revision|correct|correction)\b",
+    re.IGNORECASE,
+)
+
+
+def bl_request_subtype(email):
+    """Return the UI-only subtype for a real draft-BL request.
+
+    The benchmark intentionally keeps these messages under BL_COMPARISON,
+    so this function does not change the model category.  It only separates
+    workflow intent in the UI and prevents missing-attachment comparisons
+    from being mislabeled as requests.
+    """
+
+    if email.get("attachments"):
+        return None
+
+    body = email.get("body") or ""
+    if not pipeline.DRAFT_BL_REQUEST_RE.search(body):
+        return None
+
+    subject = email.get("subject") or ""
+
+    if BL_AMENDMENT_RE.search(subject):
+        return "BL Amendment Request"
+
+    if "to confirm docs" in subject.lower():
+        return "BL Confirmation Request"
+
+    return "BL Draft Request"
+
 
 def build_fields(result, detail):
     """Per-field table: the value from each document and a verdict."""
@@ -82,31 +114,48 @@ def sender_name(address):
     return domain or "Unknown sender"
 
 
+def workflow_type(email, result):
+    if result["category"] != "BL_COMPARISON":
+        return result["category"]
+
+    return "BL_REQUEST" if bl_request_subtype(email) else "BL_COMPARISON"
+
+
 def doc_type(email, result):
     if result["category"] == "BL_COMPARISON":
-        return "SI + BL" if email.get("attachments") else "BL request"
+        subtype = bl_request_subtype(email)
+        if subtype:
+            return subtype
+
+        # This includes the important missing-attachment case.  It is still a
+        # comparison that requires review, not a request for a draft BL.
+        return "SI + BL"
 
     return DOC_TYPES.get(result["category"], "General")
 
 
 def attachment_summary(email):
-    """{"SI": {"filename", "extension"}, "BL": {...}} for the files it has.
+    """Return the first SI / BL attachment recognised by the pipeline.
 
-    The web UI uses this to label the preview and to say when an SI or BL
-    attachment is missing. Files are named {email_id}_{SI|BL}.{extension}.
+    This uses the same robust role matcher as verification, so filenames such
+    as ``shipping_instruction.pdf`` and ``bill-of-lading.pdf`` are shown in
+    the UI instead of being hidden just because they do not end in ``_SI`` or
+    ``_BL``.
     """
 
+    attachments = email.get("attachments") or []
     summary = {}
 
-    for attachment in email.get("attachments") or []:
-        name = Path(pipeline.attachment_name(attachment)).name
-        match = ATTACHMENT_NAME.search(name)
+    for role in ("SI", "BL"):
+        matches = pipeline.find_role_attachments(attachments, role)
+        if not matches:
+            continue
 
-        if match:
-            summary[match.group(1)] = {
-                "filename": name,
-                "extension": match.group(2).lower(),
-            }
+        name = Path(pipeline.attachment_name(matches[0])).name
+        summary[role] = {
+            "filename": name,
+            "extension": Path(name).suffix.lower().lstrip("."),
+        }
 
     return summary
 
@@ -123,6 +172,8 @@ def make_ui_record(email, result, detail):
         # The dataset has no timestamps, so the email id stands in.
         "received": result["email_id"],
         "docType": doc_type(email, result),
+        "workflowType": workflow_type(email, result),
+        "workflowSubtype": bl_request_subtype(email),
         "category": result["category"],
         "status": result["status"],
         "defectFields": result["defect_fields"],

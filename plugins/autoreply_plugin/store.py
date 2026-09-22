@@ -42,11 +42,14 @@ class ReplyStore:
     def sent_path(self, email_id: str) -> Path:
         return self._path(self.sent_dir, email_id)
 
+    def preview_path(self, email_id: str) -> Path:
+        return self._path(self.preview_dir, email_id)
+
     def save_pending(self, email_id: str, payload: dict[str, Any]) -> Path:
         return self._write(self.pending_path(email_id), payload)
 
     def save_preview(self, email_id: str, payload: dict[str, Any]) -> Path:
-        return self._write(self._path(self.preview_dir, email_id), payload)
+        return self._write(self.preview_path(email_id), payload)
 
     def mark_sent(self, email_id: str, payload: dict[str, Any]) -> Path:
         path = self._write(self.sent_path(email_id), payload)

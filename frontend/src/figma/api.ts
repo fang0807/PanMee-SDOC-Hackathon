@@ -62,12 +62,16 @@ export interface ApiEmailRecord {
   body: string
   received: string
   docType: string
+  workflowType?: string
+  workflowSubtype?: string | null
+  source?: 'sample' | 'gmail' | string
   category: string
   status: 'OK' | 'MISMATCH' | 'NEEDS_REVIEW'
   defectFields: string[]
   reviewReason: string | null
   fields: ApiField[]
   attachments: ApiAttachments
+  autoReply?: ApiAutoReply
 }
 
 export interface CheckRequest {
@@ -107,6 +111,20 @@ export async function fetchEmails(): Promise<ApiEmailRecord[]> {
 
   try {
     response = await fetch(`${API_URL}/api/emails`)
+  } catch {
+    throw new Error('Could not reach the server. Check your connection and try again.')
+  }
+
+  if (!response.ok) throw new Error(await errorMessage(response))
+
+  return response.json()
+}
+
+export async function verifyEmail(emailId: string): Promise<ApiResult> {
+  let response: Response
+
+  try {
+    response = await fetch(`${API_URL}/api/emails/${encodeURIComponent(emailId)}/verify`, { method: 'POST' })
   } catch {
     throw new Error('Could not reach the server. Check your connection and try again.')
   }

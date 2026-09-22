@@ -13,3 +13,6 @@ backend/review_queue.json
 frontend/.env
 frontend/.env.local
 plugins/autoreply_plugin/runtime/
+
+# Gmail Receiver runtime mail / attachments
+backend/runtime_gmail/
