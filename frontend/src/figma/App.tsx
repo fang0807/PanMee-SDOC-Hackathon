@@ -10,6 +10,7 @@ import {
   FIELD_LABELS,
   type ApiAttachments,
   type ApiAutoReply,
+  type ApiDisplaySubject,
   type ApiEmailRecord,
   type ApiResult,
   type ApiSheet,
@@ -51,9 +52,11 @@ interface VerifField {
 interface Email {
   id: string
   subject: string
+  displaySubject: ApiDisplaySubject
   senderName: string
   sender: string
   received: string
+  receivedDate: string
   docType: string
   docResult: DocResult
   reviewDetail?: string
@@ -109,6 +112,34 @@ function parseTimeMinutes(time: string): number {
   if (m[3].toUpperCase() === 'PM' && h !== 12) h += 12
   if (m[3].toUpperCase() === 'AM' && h === 12) h = 0
   return h * 60 + min
+}
+
+// Joins the given parts with ' · ', skipping any that are empty (e.g. a
+// missing received date for the ~two-thirds of sample emails with no
+// timestamp anywhere in their source data).
+function joinParts(...parts: (string | undefined)[]): string {
+  return parts.filter(Boolean).join(' · ')
+}
+
+// For a standalone "Received" field (not joined with other text).
+function fmtReceived(received: string): string {
+  return received || 'Date unknown'
+}
+
+const FULL_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+// "2026-12-22" -> "22 December 2026", for the date-filter group heading.
+function formatFullDate(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  if (!y || !m || !d) return iso
+  return `${d} ${FULL_MONTHS[m - 1]} ${y}`
+}
+
+// "22 Dec, 09:39 PM" -> "09:39 PM", for a row under a date-group heading
+// that already states the day.
+function receivedTime(received: string): string {
+  const idx = received.indexOf(', ')
+  return idx === -1 ? '' : received.slice(idx + 2)
 }
 
 function getReviewReason(email: Email): string {
@@ -620,7 +651,7 @@ function OverviewScreen({ setScreen, setActiveNav, setVerifTab, verifiedEmails, 
                         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${resultStyles[disp].dot}`} />
                         <div className="flex-1 min-w-0">
                           <div className="text-[13px] font-medium text-[#111827] truncate group-hover:text-[#2563EB] transition-colors">{email.subject}</div>
-                          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{email.docType} · {email.received}</div>
+                          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{joinParts(email.docType, email.received)}</div>
                         </div>
                         {eff === 'resend'
                           ? <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-[#F3F4F6] text-[#6B7280]"><span className="w-1.5 h-1.5 rounded-full bg-[#9CA3AF]" />Resent</span>
@@ -766,7 +797,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                         <div className="w-8 h-8 rounded-full bg-[#F3F4F6] flex-shrink-0 flex items-center justify-center text-[10px] font-semibold text-[#6B7280]">{email.senderName.slice(0,2).toUpperCase()}</div>
                         <div className="flex-1 min-w-0">
                           <div className="text-[13px] font-semibold text-[#111827] truncate group-hover:text-[#2563EB] transition-colors">{email.subject}</div>
-                          <div className="text-[12px] text-[#9CA3AF] mt-0.5">{email.senderName} · {email.received}</div>
+                          <div className="text-[12px] text-[#9CA3AF] mt-0.5">{joinParts(email.senderName, email.received)}</div>
                         </div>
                         <span className="text-[10px] font-semibold uppercase tracking-wide text-[#2563EB] bg-[#EFF6FF] px-2 py-0.5 rounded flex-shrink-0">New</span>
                       </div>
@@ -801,7 +832,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                         <div className="w-8 h-8 rounded-full bg-[#F3F4F6] flex-shrink-0 flex items-center justify-center text-[10px] font-semibold text-[#6B7280]">{email.senderName.slice(0,2).toUpperCase()}</div>
                         <div className="min-w-0">
                           <div className="text-[13px] font-medium text-[#111827] truncate group-hover:text-[#2563EB] transition-colors">{email.subject}</div>
-                          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{email.senderName} · {email.received}</div>
+                          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{joinParts(email.senderName, email.received)}</div>
                         </div>
                       </button>
                       <span className="text-[11px] font-medium text-[#2563EB] bg-[#EFF6FF] px-2 py-0.5 rounded flex-shrink-0">{email.classifyType}</span>
@@ -835,7 +866,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                         <div className="w-7 h-7 rounded-full bg-[#F3F4F6] flex-shrink-0 flex items-center justify-center text-[10px] font-semibold text-[#9CA3AF]">{email.senderName.slice(0,2).toUpperCase()}</div>
                         <div className="flex-1 min-w-0">
                           <div className="text-[13px] text-[#374151] truncate group-hover:text-[#111827] transition-colors">{email.subject}</div>
-                          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{email.senderName} · {email.received}</div>
+                          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{joinParts(email.senderName, email.received)}</div>
                         </div>
                         {othersCatFilter === 'all' && (
                           <span className="text-[10px] font-medium text-[#9CA3AF] bg-[#F3F4F6] px-2 py-0.5 rounded flex-shrink-0">
@@ -863,7 +894,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                       <div className="w-8 h-8 rounded-full bg-[#FEF3C7] flex-shrink-0 flex items-center justify-center text-[10px] font-semibold text-[#D97706]">{email.senderName.slice(0,2).toUpperCase()}</div>
                       <div className="flex-1 min-w-0">
                         <div className="text-[13px] font-medium text-[#374151] truncate">{email.subject}</div>
-                        <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{email.senderName} · {email.received}</div>
+                        <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{joinParts(email.senderName, email.received)}</div>
                       </div>
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
                         <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#D97706] bg-[#FFFBEB] px-2 py-0.5 rounded-full"><span className="w-1.5 h-1.5 rounded-full bg-[#D97706]" />Review</span>
@@ -906,13 +937,16 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
         <BackBtn onClick={() => setScreen('inbox')} label="Back to Inbox" />
         <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
           <div className="px-7 py-6 border-b border-[#F0EEE9]">
-            <h2 className="text-[17px] font-semibold text-[#111827] tracking-[-0.015em] mb-4">{email.subject}</h2>
+            <div className="mb-4">
+              <h2 className="text-[17px] font-semibold text-[#111827] tracking-[-0.015em]">{email.displaySubject.headline}</h2>
+              {email.displaySubject.details && <div className="text-[12px] text-[#9CA3AF] mt-0.5">{email.displaySubject.details}</div>}
+            </div>
             <div className="flex items-start justify-between gap-4">
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-full bg-[#EFF6FF] flex items-center justify-center text-[12px] font-semibold text-[#2563EB]">{email.senderName.slice(0,2).toUpperCase()}</div>
                 <div><div className="text-[13px] font-medium text-[#111827]">{email.senderName}</div><div className="text-[12px] text-[#9CA3AF]">{email.sender}</div></div>
               </div>
-              <div className="text-right"><div className="text-[12px] text-[#9CA3AF]">Received</div><div className="text-[12px] font-medium text-[#374151]">{email.received}</div></div>
+              <div className="text-right"><div className="text-[12px] text-[#9CA3AF]">Received</div><div className="text-[12px] font-medium text-[#374151]">{fmtReceived(email.received)}</div></div>
             </div>
           </div>
           <div className="px-7 py-6 border-b border-[#F0EEE9]">
@@ -970,13 +1004,16 @@ function OthersDetailScreen({ emailId, onMarkRead, setScreen, readEmails }: {
             <div className="flex items-center gap-2 mb-4">
               <span className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF] bg-[#F3F4F6] px-2 py-0.5 rounded">{otherDisplayName(email.classifyType)}</span>
             </div>
-            <h2 className="text-[17px] font-semibold text-[#111827] mb-4">{email.subject}</h2>
+            <div className="mb-4">
+              <h2 className="text-[17px] font-semibold text-[#111827]">{email.displaySubject.headline}</h2>
+              {email.displaySubject.details && <div className="text-[12px] text-[#9CA3AF] mt-0.5">{email.displaySubject.details}</div>}
+            </div>
             <div className="flex items-start justify-between gap-4">
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-full bg-[#F3F4F6] flex items-center justify-center text-[12px] font-semibold text-[#6B7280]">{email.senderName.slice(0,2).toUpperCase()}</div>
                 <div><div className="text-[13px] font-medium text-[#111827]">{email.senderName}</div><div className="text-[12px] text-[#9CA3AF]">{email.sender}</div></div>
               </div>
-              <div className="text-right"><div className="text-[12px] text-[#9CA3AF]">Received</div><div className="text-[12px] font-medium text-[#374151]">{email.received}</div></div>
+              <div className="text-right"><div className="text-[12px] text-[#9CA3AF]">Received</div><div className="text-[12px] font-medium text-[#374151]">{fmtReceived(email.received)}</div></div>
             </div>
           </div>
           <div className="px-7 py-6 border-b border-[#F0EEE9]">
@@ -1023,7 +1060,7 @@ function SearchBar({ value, onChange, placeholder, variant = 'section' }: {
 
 function emailMatchesQuery(email: Email, q: string): boolean {
   const lq = q.toLowerCase()
-  return email.subject.toLowerCase().includes(lq) || email.senderName.toLowerCase().includes(lq) || email.sender.toLowerCase().includes(lq) || email.id.toLowerCase().includes(lq) || (email.docType ?? '').toLowerCase().includes(lq)
+  return email.subject.toLowerCase().includes(lq) || email.senderName.toLowerCase().includes(lq) || email.sender.toLowerCase().includes(lq) || email.id.toLowerCase().includes(lq) || (email.docType ?? '').toLowerCase().includes(lq) || email.received.toLowerCase().includes(lq)
 }
 
 // ─── Verification ─────────────────────────────────────────────────────────────
@@ -1043,8 +1080,9 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
   const [selectedForDelete, setSelectedForDelete] = useState<Set<string>>(new Set())
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [matchReplyFilter, setMatchReplyFilter] = useState<MatchReplyFilter>('all')
+  const [dateFilter, setDateFilter] = useState('')
 
-  React.useEffect(() => { setSectionQuery(''); setMatchReplyFilter('all') }, [activeTab])
+  React.useEffect(() => { setSectionQuery(''); setMatchReplyFilter('all'); setDateFilter('') }, [activeTab])
   React.useEffect(() => { if (!deleteMode) setSelectedForDelete(new Set()) }, [deleteMode])
   const effClass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification }
 
@@ -1074,7 +1112,8 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
   else if (activeTab === 'mismatch') baseFiltered = mismatchEmails
   else baseFiltered = reviewEmails
 
-  const filtered = sectionQuery.trim() ? baseFiltered.filter(e => emailMatchesQuery(e, sectionQuery)) : baseFiltered
+  const textFiltered = sectionQuery.trim() ? baseFiltered.filter(e => emailMatchesQuery(e, sectionQuery)) : baseFiltered
+  const filtered = dateFilter ? textFiltered.filter(e => e.receivedDate === dateFilter) : textFiltered
 
   const counts = {
     all: allVerifEmails.length,
@@ -1162,18 +1201,29 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
           </div>
         )}
 
-        <div className="mb-4">
-          <SearchBar value={sectionQuery} onChange={setSectionQuery} placeholder={sectionPlaceholders[activeTab]} variant="section" />
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex-1"><SearchBar value={sectionQuery} onChange={setSectionQuery} placeholder={sectionPlaceholders[activeTab]} variant="section" /></div>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <input type="date" value={dateFilter} onChange={e => setDateFilter(e.target.value)}
+              className="text-[12px] text-[#374151] border border-[#E8E6E1] rounded-lg px-2.5 py-2 bg-white hover:bg-[#F9F8F6] transition-colors" />
+            {dateFilter && (
+              <button onClick={() => setDateFilter('')} className="btn-micro text-[12px] text-[#6B7280] hover:text-[#374151] px-1.5">Clear</button>
+            )}
+          </div>
         </div>
+
+        {dateFilter && filtered.length > 0 && (
+          <div className="text-[12px] font-semibold text-[#9CA3AF] uppercase tracking-wide mb-2 px-1">{formatFullDate(dateFilter)}</div>
+        )}
 
         {filtered.length === 0
           ? <div className="bg-white border border-[#E8E6E1] rounded-xl p-12 text-center text-[13px] text-[#9CA3AF]">
-              {sectionQuery.trim() ? `No emails found for "${sectionQuery}"` : activeTab === 'all' ? 'No verified documents yet.' : activeTab === 'match' ? 'No matched emails.' : activeTab === 'mismatch' ? 'No mismatches found.' : 'No documents requiring review.'}
+              {dateFilter ? `No emails received on ${formatFullDate(dateFilter)}` : sectionQuery.trim() ? `No emails found for "${sectionQuery}"` : activeTab === 'all' ? 'No verified documents yet.' : activeTab === 'match' ? 'No matched emails.' : activeTab === 'mismatch' ? 'No mismatches found.' : 'No documents requiring review.'}
             </div>
           : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
               <div className={`grid text-[11px] font-semibold text-[#9CA3AF] uppercase tracking-wide px-6 py-3 border-b border-[#F0EEE9] bg-[#FAFAF9] ${deleteMode ? 'grid-cols-[32px_1fr_100px_140px_160px_110px_32px]' : 'grid-cols-[1fr_100px_140px_160px_110px_32px]'}`}>
                 {deleteMode && <span />}
-                <span>Document</span><span>Type</span><span>Received</span><span>Result</span><span>Auto Reply</span><span />
+                <span>Document</span><span>Type</span><span>{dateFilter ? 'Time' : 'Received'}</span><span>Result</span><span>Auto Reply</span><span />
               </div>
               {filtered.map((email, i) => {
                 const eff = effectiveResult(email, manualDecisions)
@@ -1217,7 +1267,7 @@ function VerificationScreen({ verifiedEmails, classifiedEmails, reclassification
                       </div>
                     </div>
                     <span className="text-[11px] font-medium text-[#6B7280] bg-[#F3F4F6] px-2 py-0.5 rounded self-start mt-0.5">{email.docType}</span>
-                    <span className="text-[12px] text-[#9CA3AF]">{email.received}</span>
+                    <span className="text-[12px] text-[#9CA3AF]">{dateFilter ? (receivedTime(email.received) || '—') : fmtReceived(email.received)}</span>
                     <div className="flex items-center gap-2 justify-end">
                       {isMatch && !isReplied && !deleteMode && (
                         <button onClick={e => { e.stopPropagation(); onReply(email.id) }}
@@ -1277,13 +1327,14 @@ function VerificationDetailScreen({ emailId, manualDecisions, reclassifications,
   if (isNoAttachment) {
     return (
       <div className="flex-1 overflow-y-auto">
-        <TopBar title="Verification Result" subtitle={email.received} />
+        <TopBar title="Verification Result" subtitle={fmtReceived(email.received)} />
         <div className="px-8 py-7 max-w-[860px]">
           <BackBtn onClick={() => setScreen('verification')} label="Back to Verification" />
           <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden mb-5">
             <div className="px-7 py-6 border-b border-[#F0EEE9]">
-              <h2 className="text-[17px] font-semibold text-[#111827] mb-1">{email.subject}</h2>
-              <div className="text-[12px] text-[#9CA3AF]">{email.senderName} · {email.received}</div>
+              <h2 className="text-[17px] font-semibold text-[#111827] mb-1">{email.displaySubject.headline}</h2>
+              {email.displaySubject.details && <div className="text-[12px] text-[#9CA3AF] mb-1">{email.displaySubject.details}</div>}
+              <div className="text-[12px] text-[#9CA3AF]">{joinParts(email.senderName)}</div>
             </div>
             <div className="px-7 py-6 bg-[#FEF9F9] border-b border-[#F0EEE9]">
               <div className="flex items-start gap-4">
@@ -1328,7 +1379,7 @@ function VerificationDetailScreen({ emailId, manualDecisions, reclassifications,
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <TopBar title="Verification Result" subtitle={email.received} />
+      <TopBar title="Verification Result" subtitle={fmtReceived(email.received)} />
       <div className="px-8 py-7">
         <BackBtn onClick={() => setScreen('verification')} label="Back to Verification" />
         {decision && decision !== 'keep-review' && (
@@ -1350,13 +1401,14 @@ function VerificationDetailScreen({ emailId, manualDecisions, reclassifications,
             {disp === 'review'   && <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 6v6M10 14v1" stroke="#D97706" strokeWidth="1.8" strokeLinecap="round" /></svg>}
           </div>
           <div className="flex-1">
-            <div className="text-[17px] font-semibold text-[#111827] tracking-[-0.01em] mb-0.5">{email.subject}</div>
+            <div className="text-[17px] font-semibold text-[#111827] tracking-[-0.01em] mb-0.5">{email.displaySubject.headline}</div>
+            {email.displaySubject.details && <div className="text-[12px] text-[#9CA3AF] mb-0.5">{email.displaySubject.details}</div>}
             <div className="text-[13px] text-[#6B7280]">{getVerifSummary(email)}</div>
             {reason && <div className="mt-0.5 text-[12px] text-[#D97706]">Reason: {reason}</div>}
           </div>
           <div className="flex-shrink-0 text-right">
             <div className="text-[11px] text-[#9CA3AF] uppercase tracking-wide mb-1">Processed</div>
-            <div className="text-[12px] font-medium text-[#374151]">{email.received}</div>
+            <div className="text-[12px] font-medium text-[#374151]">{fmtReceived(email.received)}</div>
           </div>
         </div>
         {email.fields.length > 0 && (
@@ -1609,7 +1661,7 @@ function ManualReviewScreen({ emailId, setScreen, backTo, reviewMode = 'classify
               <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF]">Email Under Review</div>
             </div>
             <div className="px-6 py-5">
-              <div className="mb-4"><div className="text-[17px] font-semibold text-[#111827] mb-1">{email.subject}</div><div className="text-[12px] text-[#9CA3AF]">{email.senderName} · {email.sender} · {email.received}</div></div>
+              <div className="mb-4"><div className="text-[17px] font-semibold text-[#111827] mb-1">{email.displaySubject.headline}</div>{email.displaySubject.details && <div className="text-[12px] text-[#9CA3AF] mb-1">{email.displaySubject.details}</div>}<div className="text-[12px] text-[#9CA3AF]">{joinParts(email.senderName, email.sender)}</div></div>
               <div className="mt-5 pt-5 border-t border-[#F0EEE9]">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-[#9CA3AF] mb-3">Attachment</div>
                 {hasAttachment ? (
@@ -1672,9 +1724,9 @@ function ManualReviewScreen({ emailId, setScreen, backTo, reviewMode = 'classify
             <div className="px-6 py-5">
               <div className="grid grid-cols-2 gap-6 mb-5">
                 <div><div className="text-[11px] text-[#9CA3AF] mb-1">From</div><div className="text-[13px] font-medium text-[#111827]">{email.senderName}</div><div className="text-[12px] text-[#9CA3AF]">{email.sender}</div></div>
-                <div><div className="text-[11px] text-[#9CA3AF] mb-1">Received</div><div className="text-[13px] text-[#374151]">{email.received}</div></div>
+                <div><div className="text-[11px] text-[#9CA3AF] mb-1">Received</div><div className="text-[13px] text-[#374151]">{fmtReceived(email.received)}</div></div>
               </div>
-              <div className="mb-5"><div className="text-[11px] text-[#9CA3AF] mb-1">Subject</div><div className="text-[13px] font-medium text-[#111827]">{email.subject}</div></div>
+              <div className="mb-5"><div className="text-[11px] text-[#9CA3AF] mb-1">Subject</div><div className="text-[13px] font-medium text-[#111827]">{email.displaySubject.headline}</div>{email.displaySubject.details && <div className="text-[12px] text-[#9CA3AF] mt-0.5">{email.displaySubject.details}</div>}</div>
               <div className="text-[12.5px] text-[#6B7280] leading-[1.7] border-t border-[#F0EEE9] pt-5">
                 <p className="mb-2">This email was received from {email.senderName}. The AI classification system could not identify the email type with sufficient confidence.</p>
                 <p className="mb-2">The attached documents and email content do not match any known classification pattern.</p>
@@ -1705,8 +1757,8 @@ function ManualReviewScreen({ emailId, setScreen, backTo, reviewMode = 'classify
                 </div>
                 <div className="px-5 py-4">
                   <div className="mb-3"><div className="text-[11px] text-[#9CA3AF] mb-0.5">From</div><div className="text-[13px] font-medium text-[#111827]">{email.senderName}</div><div className="text-[12px] text-[#9CA3AF]">{email.sender}</div></div>
-                  <div className="mb-3"><div className="text-[11px] text-[#9CA3AF] mb-0.5">Subject</div><div className="text-[13px] text-[#374151]">{email.subject}</div></div>
-                  <div className="mb-4"><div className="text-[11px] text-[#9CA3AF] mb-0.5">Received</div><div className="text-[12px] text-[#374151]">{email.received}</div></div>
+                  <div className="mb-3"><div className="text-[11px] text-[#9CA3AF] mb-0.5">Subject</div><div className="text-[13px] text-[#374151]">{email.displaySubject.headline}</div>{email.displaySubject.details && <div className="text-[12px] text-[#9CA3AF] mt-0.5">{email.displaySubject.details}</div>}</div>
+                  <div className="mb-4"><div className="text-[11px] text-[#9CA3AF] mb-0.5">Received</div><div className="text-[12px] text-[#374151]">{fmtReceived(email.received)}</div></div>
                   <div className="text-[12.5px] text-[#6B7280] leading-[1.7] border-t border-[#F0EEE9] pt-4">
                     <p className="whitespace-pre-wrap break-words">{email.body || 'This email has no message text.'}</p>
                   </div>
@@ -2014,7 +2066,7 @@ function ResendScreen({ manualDecisions, resentEmails, deletedEmails, setScreen,
                         <div className="flex items-start justify-between gap-4">
                           <div>
                             <div className="text-[14px] font-semibold text-[#111827] mb-1">{email.subject}</div>
-                            <div className="text-[12px] text-[#9CA3AF]">{email.senderName} · {email.received} · {email.docType}</div>
+                            <div className="text-[12px] text-[#9CA3AF]">{joinParts(email.senderName, email.received)} · {email.docType}</div>
                           </div>
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-[#F3F4F6] text-[#6B7280] flex-shrink-0">
                             <span className="w-1.5 h-1.5 rounded-full bg-[#9CA3AF]" />Ready to Resend
@@ -2079,6 +2131,14 @@ function formatReceived(date: Date): string {
   return `${date.getDate()} ${MONTHS[date.getMonth()]}, ${hours % 12 || 12}:${minutes} ${hours < 12 ? 'AM' : 'PM'}`
 }
 
+// "2026-09-21", the calendar-picker value format (local time, not UTC).
+function isoDate(date: Date): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
 function docResultFor(status: ApiResult['status']): DocResult {
   return status === 'OK' ? 'match' : status === 'MISMATCH' ? 'mismatch' : 'review'
 }
@@ -2097,9 +2157,11 @@ function toEmail(result: ApiResult, subject: string, sender: string, body: strin
   return {
     id: result.email_id,
     subject,
+    displaySubject: { headline: subject, details: '' },
     senderName: sender || 'Live upload',
     sender: sender || '',
     received: formatReceived(new Date()),
+    receivedDate: isoDate(new Date()),
     docType: 'SI + BL',
     docResult: docResultFor(result.status),
     reviewDetail: reviewDetailFor(result.review_reason),
@@ -2118,9 +2180,13 @@ function fromRecord(record: ApiEmailRecord): Email {
   return {
     id: record.id,
     subject: record.subject,
+    // Falls back for a backend that predates displaySubject (version skew
+    // during a deploy), so the detail views don't crash on a stale response.
+    displaySubject: record.displaySubject ?? { headline: record.subject, details: '' },
     senderName: record.senderName,
     sender: record.sender,
     received: record.received,
+    receivedDate: record.receivedDate,
     docType: record.docType,
     docResult: docResultFor(record.status),
     reviewDetail: reviewDetailFor(record.reviewReason),
@@ -2142,7 +2208,11 @@ function loadLiveEmails(): Email[] {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(LIVE_STORAGE_KEY) ?? '[]')
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(e => e && typeof e.id === 'string' && Array.isArray(e.fields))
+    return parsed
+      .filter(e => e && typeof e.id === 'string' && Array.isArray(e.fields))
+      // Live checks saved before displaySubject existed: backfill so older
+      // browser-local saves don't crash the detail-view render sites.
+      .map(e => ({ ...e, displaySubject: e.displaySubject ?? { headline: e.subject ?? '', details: '' } }))
   } catch {
     return []
   }
@@ -2458,7 +2528,7 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-medium text-[#111827] truncate group-hover:text-[#2563EB] transition-colors">{email.subject}</div>
-          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{email.senderName} · {email.received}</div>
+          <div className="text-[11.5px] text-[#9CA3AF] mt-0.5">{joinParts(email.senderName, email.received)}</div>
         </div>
         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium flex-shrink-0 ${status.badge}`}>
           <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />{status.label}

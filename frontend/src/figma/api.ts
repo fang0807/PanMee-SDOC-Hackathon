@@ -53,14 +53,21 @@ export interface ApiSheet {
   truncated: boolean
 }
 
+export interface ApiDisplaySubject {
+  headline: string
+  details: string
+}
+
 // One sample-inbox email with its pipeline result (GET /api/emails).
 export interface ApiEmailRecord {
   id: string
   subject: string
+  displaySubject: ApiDisplaySubject
   sender: string
   senderName: string
   body: string
   received: string
+  receivedDate: string
   docType: string
   category: string
   status: 'OK' | 'MISMATCH' | 'NEEDS_REVIEW'

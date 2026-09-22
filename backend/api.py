@@ -74,7 +74,9 @@ def search_text(record):
     """Everything a person might type to find this email, lower-cased.
 
     Covers the id, subject, sender, body (shipment and booking numbers
-    appear there), document type, category and the SI / BL field values.
+    appear there), document type, category, received date (where parsed
+    from the body; see ui_records.received_date) and the SI / BL field
+    values.
     """
 
     parts = [
@@ -85,6 +87,7 @@ def search_text(record):
         record["body"],
         record["docType"],
         record["category"],
+        record["received"],
     ]
 
     for field in record["fields"]:
