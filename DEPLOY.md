@@ -91,3 +91,12 @@ docker run --rm -p 8000:8000 smartdoc-api
 
 Once the Vercel URL is known, go back to the backend and make sure `ALLOWED_ORIGINS` matches it exactly
 (no trailing slash), otherwise the browser blocks the requests.
+
+## Gmail Receiver (optional)
+
+SmartDoc can ingest customer Gmail automatically through IMAP. Configure the
+backend environment with `GMAIL_RECEIVER_ENABLED=1`,
+`GMAIL_RECEIVER_USERNAME`, and `GMAIL_RECEIVER_APP_PASSWORD`. See
+`GMAIL_RECEIVER.md` for the full local/deployment workflow. If runtime email
+history must survive container replacement, mount a persistent disk and set
+`GMAIL_RECEIVER_DATA_DIR` to that path.

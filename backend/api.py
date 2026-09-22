@@ -24,7 +24,15 @@ from openpyxl import load_workbook
 import main as pipeline
 from loader import Inbox
 from ui_records import build_fields
-from autoreply_bridge import handle_verification_autoreply
+from autoreply_bridge import (
+    get_verification_autoreply_state,
+    handle_verification_autoreply,
+)
+from gmail_receiver import (
+    GmailInboxStore,
+    GmailReceiver,
+    receiver_enabled_from_env,
+)
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -52,7 +60,7 @@ UI_DATA_PATH = Path(__file__).resolve().parent / "ui_data.json"
 # {email_id}_{SI|BL}.{extension}.
 ATTACHMENTS_DIR = Path(__file__).resolve().parent / "attachments"
 
-EMAIL_ID_PATTERN = re.compile(r"email_\d{1,6}")
+EMAIL_ID_PATTERN = re.compile(r"(?:email_\d{1,6}|gmail_[a-f0-9]{12})")
 ATTACHMENT_ROLES = {"SI", "BL"}
 
 # The Excel preview is a table, so very large sheets are cut short.
@@ -69,6 +77,25 @@ def load_ui_emails():
 
 UI_EMAILS = load_ui_emails()
 
+# Customer emails received from Gmail are persisted outside the bundled
+# sample dataset so git/deploy updates never overwrite them.
+GMAIL_RUNTIME_DIR = Path(
+    os.getenv(
+        "GMAIL_RECEIVER_DATA_DIR",
+        str(Path(__file__).resolve().parent / "runtime_gmail"),
+    )
+)
+GMAIL_STORE = GmailInboxStore(GMAIL_RUNTIME_DIR)
+GMAIL_RECEIVER = None
+
+
+def all_ui_emails():
+    """Bundled sample records plus Gmail-received customer records."""
+
+    runtime_records = GMAIL_STORE.list_records()
+    runtime_ids = {record.get("id") for record in runtime_records}
+    return runtime_records + [record for record in UI_EMAILS if record.get("id") not in runtime_ids]
+
 
 def search_text(record):
     """Everything a person might type to find this email, lower-cased.
@@ -80,25 +107,24 @@ def search_text(record):
     """
 
     parts = [
-        record["id"],
-        record["subject"],
-        record["sender"],
-        record["senderName"],
-        record["body"],
-        record["docType"],
-        record["category"],
-        record["received"],
+        record.get("id", ""),
+        record.get("subject", ""),
+        record.get("sender", ""),
+        record.get("senderName", ""),
+        record.get("body", ""),
+        record.get("docType", ""),
+        record.get("workflowType", ""),
+        record.get("workflowSubtype", ""),
+        record.get("category", ""),
+        record.get("received", ""),
     ]
 
-    for field in record["fields"]:
+    for field in record.get("fields") or []:
         parts.append(field["si"])
         parts.append(field["bl"])
 
     return " ".join(str(part) for part in parts if part).lower()
 
-
-# Same order as UI_EMAILS, so index i of one is index i of the other.
-UI_SEARCH_TEXT = [search_text(record) for record in UI_EMAILS]
 
 MAX_SEARCH_IDS = 1000
 
@@ -123,9 +149,56 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def start_gmail_receiver():
+    """Start optional Gmail polling without blocking the API."""
+
+    global GMAIL_RECEIVER
+    GMAIL_RECEIVER = GmailReceiver.from_env(GMAIL_STORE, PIPELINE_LOCK)
+    if receiver_enabled_from_env():
+        try:
+            GMAIL_RECEIVER.start()
+        except Exception as exc:
+            # Keep the verification API available even if Gmail credentials or
+            # connectivity are wrong.  /api/gmail-receiver/status exposes it.
+            GMAIL_RECEIVER.last_error = f"{type(exc).__name__}: {exc}"
+
+
+@app.on_event("shutdown")
+def stop_gmail_receiver():
+    if GMAIL_RECEIVER is not None:
+        GMAIL_RECEIVER.stop()
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/gmail-receiver/status")
+def gmail_receiver_status():
+    receiver = GMAIL_RECEIVER or GmailReceiver.from_env(GMAIL_STORE, PIPELINE_LOCK)
+    return {
+        "enabled": receiver_enabled_from_env(),
+        **receiver.status(),
+    }
+
+
+@app.post("/api/gmail-receiver/poll")
+async def gmail_receiver_poll():
+    """Run one Gmail poll immediately (useful for testing/demo)."""
+
+    global GMAIL_RECEIVER
+    if GMAIL_RECEIVER is None:
+        GMAIL_RECEIVER = GmailReceiver.from_env(GMAIL_STORE, PIPELINE_LOCK)
+    try:
+        imported = await run_in_threadpool(GMAIL_RECEIVER.poll_once)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Gmail Receiver failed: {type(exc).__name__}: {exc}",
+        )
+    return {"ok": True, "imported": imported, **GMAIL_RECEIVER.status()}
 
 
 async def save_upload(upload, target_dir, email_id, role):
@@ -176,11 +249,94 @@ def run_pipeline(email, workdir):
     return result, detail
 
 
+def ui_email_with_autoreply(record):
+    item = dict(record)
+    auto_reply = get_verification_autoreply_state(record.get("id", ""))
+    if auto_reply:
+        item["autoReply"] = auto_reply
+    return item
+
+
 @app.get("/api/emails")
 def list_emails():
-    """The pipeline results for the sample inbox (see export_ui_data.py)."""
+    """All recorded emails, including Gmail-received customer mail."""
 
-    return UI_EMAILS
+    return [ui_email_with_autoreply(record) for record in all_ui_emails()]
+
+
+def find_ui_email(email_id):
+    for record in all_ui_emails():
+        if record.get("id") == email_id:
+            return record
+    raise HTTPException(status_code=404, detail="Email not found.")
+
+
+@app.post("/api/emails/{email_id}/verify")
+async def verify_sample_email(email_id: str):
+    """Confirm one sample-inbox SI/BL verification and run Auto Reply.
+
+    The sample inbox already contains the pipeline result exported in ui_data.json.
+    Clicking Verify is therefore the workflow event that confirms that result and
+    hands it to the standalone Auto Reply plugin.  This avoids re-reading the
+    same sample files while still keeping sending behind an explicit verification
+    action.
+    """
+
+    record = find_ui_email(email_id)
+
+    if record.get("category") != "BL_COMPARISON":
+        raise HTTPException(
+            status_code=400,
+            detail="Only BL_COMPARISON emails can be verified here.",
+        )
+
+    # A draft-BL request is kept under BL_COMPARISON by the benchmark schema,
+    # but it is not an SI-vs-BL document comparison and must never trigger the
+    # verification/Auto Reply workflow.  The frontend routes it to Others as
+    # "BL Request"; keep the API safe if it is called directly.
+    if record.get("workflowType") == "BL_REQUEST":
+        raise HTTPException(
+            status_code=400,
+            detail="BL request emails do not contain an SI/BL pair to verify.",
+        )
+
+    result = {
+        "email_id": record["id"],
+        "category": record["category"],
+        "status": record["status"],
+        "has_defect": bool(record.get("defectFields")),
+        "defect_fields": list(record.get("defectFields") or []),
+        "review_reason": record.get("reviewReason"),
+    }
+    email = {
+        "email_id": record["id"],
+        "from": record.get("sender", ""),
+        "sender": record.get("sender", ""),
+        "subject": record.get("subject", ""),
+        "body": record.get("body", ""),
+        "attachments": [],
+    }
+
+    try:
+        auto_reply = await run_in_threadpool(
+            handle_verification_autoreply,
+            email,
+            result,
+        )
+    except Exception as exc:
+        auto_reply = {
+            "ok": False,
+            "email_id": email_id,
+            "status": result.get("status"),
+            "action": "ERROR",
+            "reason": f"Auto Reply failed: {type(exc).__name__}: {exc}",
+        }
+
+    return {
+        **result,
+        "fields": record.get("fields") or [],
+        "auto_reply": auto_reply,
+    }
 
 
 @app.get("/api/emails/search")
@@ -226,20 +382,21 @@ def search_emails(
                 detail=f"Pass at most {MAX_SEARCH_IDS} ids.",
             )
 
+    records = all_ui_emails()
     matches = [
         record
-        for record, text in zip(UI_EMAILS, UI_SEARCH_TEXT)
+        for record in records
         if (wanted_ids is None or record["id"] in wanted_ids)
         and (status is None or record["status"] == status)
         and (category is None or record["category"] == category)
-        and all(word in text for word in words)
+        and all(word in search_text(record) for word in words)
     ]
 
     return {
         "total": len(matches),
         "limit": limit,
         "offset": offset,
-        "results": matches[offset:offset + limit],
+        "results": [ui_email_with_autoreply(record) for record in matches[offset:offset + limit]],
     }
 
 
@@ -257,6 +414,8 @@ def find_attachment(email_id, role):
         raise HTTPException(status_code=404, detail="Attachment not found.")
 
     matches = sorted(ATTACHMENTS_DIR.glob(f"{email_id}_{role}.*"))
+    if not matches:
+        matches = sorted(GMAIL_STORE.attachments_dir.glob(f"{email_id}_{role}.*"))
 
     if not matches:
         raise HTTPException(
