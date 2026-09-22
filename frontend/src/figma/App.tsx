@@ -874,7 +874,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
           <section>
             <SectionHdr label="BL Comparison" count={blComparison.length}
               action={blComparison.length > 0
-                ? <button onClick={onVerifyAll} className="btn-micro text-[12px] font-medium text-[#6B7280] bg-white border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3 py-1.5 rounded-lg transition-colors">Verify All</button>
+                ? <button onClick={onVerifyAll} title="Compares the SI and BL documents for every email below and flags any mismatched fields" className="btn-micro text-[12px] font-medium text-[#6B7280] bg-white border border-[#E8E6E1] hover:bg-[#F9F8F6] px-3 py-1.5 rounded-lg transition-colors">Verify All</button>
                 : null}
             />
             {shownBLComparison.length === 0
@@ -892,6 +892,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                       </button>
                       <span className="text-[11px] font-medium text-[#2563EB] bg-[#EFF6FF] px-2 py-0.5 rounded flex-shrink-0">{email.classifyType}</span>
                       <button onClick={() => onVerify(email.id)}
+                        title="Compares this email's SI and BL documents and flags any mismatched fields"
                         className="btn-micro flex items-center gap-1.5 text-[12px] font-medium text-[#2563EB] border border-[#BFDBFE] bg-white hover:bg-[#EFF6FF] px-3 py-1.5 rounded-lg transition-colors flex-shrink-0">
                         <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#2563EB" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
                         Verify
@@ -1042,7 +1043,7 @@ function InboxDetailScreen({ emailId, classifiedEmails, onVerify, setScreen, set
               : <div className="flex items-center gap-2 text-[12px] text-[#9CA3AF]"><span className="w-1.5 h-1.5 rounded-full bg-[#9CA3AF]" />New incoming — not yet classified</div>
             }
             {isClassified && isBL && (
-              <button onClick={handleVerify} className="btn-micro flex items-center gap-2 bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[13px] font-medium px-5 py-2.5 rounded-lg transition-colors">
+              <button onClick={handleVerify} title="Compares this email's SI and BL documents field by field and flags any mismatches" className="btn-micro flex items-center gap-2 bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[13px] font-medium px-5 py-2.5 rounded-lg transition-colors">
                 Verify
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7h8M8 4l3 3-3 3" stroke="white" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </button>
@@ -2498,6 +2499,7 @@ function LiveCheckScreen({ onSave, onView }: {
 function DocVerifyBtn({ onClick }: { onClick: () => void }) {
   return (
     <button onClick={e => { e.stopPropagation(); onClick() }}
+      title="Compares this email's SI and BL documents and flags any mismatched fields"
       className="btn-micro flex items-center gap-1.5 text-[12px] font-medium text-[#2563EB] border border-[#BFDBFE] bg-white hover:bg-[#EFF6FF] px-3 py-1.5 rounded-lg transition-colors flex-shrink-0">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#2563EB" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
       Verify

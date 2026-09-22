@@ -56,8 +56,8 @@ If, say, the SI lists 3 containers and the BL lists 4, only `container_count` is
 
 ## 2. What we built
 
-A three-part system that turns the inbox into a scored, explainable pipeline, with a web app on
-top for the people who have to act on it.
+A three-part pipeline that turns the inbox into a scored, explainable decision for every email,
+with a web app on top for the people who have to act on the output.
 
 ```
 inbox (JSON emails + SI/BL attachments)
@@ -79,33 +79,122 @@ inbox (JSON emails + SI/BL attachments)
    shown in Inbox → Others                              MISMATCH ─▶ pending-review draft, then Resend
 ```
 
-- **Classification** (`backend/classifier.py`) is rule-based first — subject/body patterns,
-  attachment presence, keyword scoring — and only falls back to an optional LLM
-  (`backend/semantic_layer/`) when its own confidence is below threshold. This keeps the system
-  fast and explainable, and still usable with zero API keys configured.
-- **Extraction** (`backend/extractor.py`, `backend/ocr.py`, `backend/ocr_checks.py`) reads plain
-  text, PDF (`pypdf`), and Word (`docx`) attachments, recognizes dozens of label variants per
-  field (`"POL"`, `"Loading Port"`, `"Port of Loading (POL)"` all normalize to
-  `port_of_loading`), and falls back to Tesseract OCR for image-only/scanned pages.
-- **Comparison** (`backend/comparator.py`) normalizes each value (case, whitespace, UN/LOCODE
-  suffixes, unit formatting) before comparing, so formatting differences don't produce false
-  mismatches, then reports exactly which of the seven fields disagree.
-- **Human review** (`backend/semantic_layer/review_queue.py`) catches what the pipeline can't
-  resolve — missing attachment, unreadable document, missing value, wrong document type — and
-  surfaces it with the reason and source evidence rather than guessing. It's what the "Reliability"
-  score section below measures.
-- **The web app** (`frontend/`, React + TypeScript + Vite) is the interface a shipping-ops
-  employee actually uses: an Inbox workflow (New → Classify → BL Comparison → Verify), a
-  Verification screen with Match/Mismatch/Review tabs and a date filter, a Documents archive, a
-  Manual Review workspace for escalated emails, a Resend queue for corrections, and a Live Check
-  page to upload a fresh SI/BL pair and see the result immediately.
-- **Auto Reply** (`plugins/autoreply_plugin/`) is a standalone plugin that runs after
-  verification: it drafts (and, once enabled, sends) a confirmation on `OK`, and prepares a
-  pending-review draft on `MISMATCH` that an employee approves before it goes out. It never
-  touches the classifier, extractor, comparator, API, or frontend.
-- **Gmail Receiver** (`backend/gmail_receiver.py`, optional) polls a real Gmail inbox over IMAP,
-  runs new mail through the same pipeline, and the web app picks it up automatically — so the
-  same system can sit in front of a live inbox, not just the sample dataset.
+Every stage is designed to be **inspectable**: nothing produces a bare "yes/no". A classification
+carries the scores it beat and the rule names that fired; a comparison carries the SI and BL value
+side by side for every field it flagged; an escalation carries a reason and the evidence that led
+to it. That's a deliberate choice for a document-checking system in a shipping context — an
+operator has to be able to see *why* the system decided something before acting on it.
+
+### 2.1 Classification — rules first, LLM only when unsure
+
+`backend/classifier.py` is a weighted rule engine, not a black box. For each email it runs three
+independent signal sources and sums their weights into a score per category:
+
+1. **Attachment structure.** Filenames are pattern-matched for an `SI`/`BL` role
+   (`xxx_SI.pdf`, `BL_xxx.docx`, …). Both roles present is the strongest signal for
+   `BL_COMPARISON`; either alone nudges toward comparison or a fresh SI request.
+2. **Inline SI structure.** The body is scanned for SI-shaped lines (`Shipper:`, `POL:`,
+   `Gross Wt:`, …) — five or more hits is treated as an inline SI even with no attachment at all.
+3. **Body and subject cues.** ~70 hand-written regexes per category (e.g. *"compare SI against
+   draft BL"*, *"please find shipping instruction for"*, *"automated notification"*,
+   *"verify your account"*) each contribute a weight tuned from misclassifications in the
+   dataset.
+
+The category with the highest total wins, and **confidence is the margin to the runner-up**, not
+the raw score: `confidence = 1 - e^(-margin / 2)`. A clear win (nothing else scored) is
+high-confidence; a narrow win between two plausible categories is low-confidence, however high the
+absolute score. Two guard rules exist specifically because generic keyword matching alone
+misreads this dataset's structure:
+
+- **SI protection** — a canonical SI email often ends with *"please revert with draft BL once
+  available"*, which contains the word "BL" but is not a comparison request. If an email matches
+  the SI template and has no explicit compare/check/against wording near "BL", its
+  `BL_COMPARISON` score is capped rather than left to win on a stray keyword.
+- **Spam override** — a handful of unambiguous phrases (*"verify your account"*, *"you have
+  won"*, *"bitcoin"*, *"gift card"*) add a flat bonus so obvious spam doesn't lose to a rule that
+  happens to score higher on the invoice/general lists.
+
+Only when the rules' own confidence falls below `SEMANTIC_CLASSIFICATION_THRESHOLD` (default
+`0.60`) does the optional LLM fallback in `backend/semantic_layer/` get a turn, and it can only
+choose one of the five fixed categories or abstain — it never overrides a confident rule result.
+That's what keeps the pipeline fast, deterministic, and fully usable with zero API keys
+configured; the LLM is a tie-breaker, not the decision-maker.
+
+### 2.2 Extraction — reading the documents, not just the emails
+
+`backend/extractor.py` locates the seven shipment fields inside an SI or BL attachment,
+whatever format it arrives in. Real shipping paperwork never uses one field name consistently, so
+extraction is built around a **label-alias table**: dozens of label variants per field (`"POL"`,
+`"Loading Port"`, `"Port of Loading (POL)"`, `"P.O.L."`) all resolve to the same canonical key
+(`port_of_loading`) before anything is compared. `backend/ocr.py` / `backend/ocr_checks.py` add a
+Tesseract OCR pass for image-only or scanned pages, so a photographed BL is read the same way as a
+native PDF — it just costs more time and can fail more often, which is one of the reasons a
+document ends up in human review instead of a false result.
+
+### 2.3 Comparison — normalize before you compare
+
+`backend/comparator.py` treats "the values look different" and "the values *are* different" as
+two different problems, and only reports the second. Each field gets normalization matched to how
+that field actually varies across real documents:
+
+- **Ports** — collapse whitespace/case, then strip a trailing UN/LOCODE suffix, so
+  `"Nantong, China (CNNTG)"` and `"NANTONG, CHINA"` compare equal.
+- **Parties** (shipper/consignee/notify) — an SI often lists `"NAME | full address, ..."` while
+  the BL lists just the name, so only the name segment before the first `|` is compared.
+- **Weights** — commas and units are stripped down to the bare number, so `"12,500 KGS"` and
+  `"12500"` compare equal.
+- **Container counts** — spacing around `×`/`X` is normalized so `"10 X 40HC"` and `"10X40HC"`
+  compare equal.
+
+A field where *both* documents are missing a value is reported as `missing`, not `mismatch` —
+there's nothing to disagree about. A field present on one side and absent on the other **is** a
+mismatch (e.g. SI has no consignee, BL does): that's a real discrepancy, not a data gap. Every
+other field is compared value-for-value after normalization, and only the fields that disagree are
+returned — a perfect match produces an empty list, not seven "OK"s.
+
+### 2.4 Human review — escalate with evidence, never guess
+
+`backend/semantic_layer/review_queue.py` is where anything the pipeline can't safely resolve on
+its own lands: a missing attachment, a document that OCR couldn't read, a field with no value on
+either side of a real comparison, or an attachment that turned out to be the wrong document type
+entirely. Each entry records *why* it was escalated and the source evidence behind that reason, so
+the person picking it up in the Manual Review Workspace sees the same thing the pipeline saw
+instead of a bare "needs review" flag. This queue is exactly what the "Reliability" row in the
+score table (§3) measures — 20/20 of the dataset's deliberately broken cases were caught and
+routed here rather than silently scored as a false match or false mismatch.
+
+### 2.5 The web app
+
+`frontend/` (React + TypeScript + Vite) is the interface a shipping-ops employee actually works
+in, built around the same four stages: an **Inbox** that shows each email moving
+New → Classify → BL Comparison → Verify, a **Verification** screen with Match / Mismatch / Review
+tabs and a date filter, a **Documents** archive of everything that's been processed, the
+**Manual Review Workspace** for escalated emails, a **Resend** queue for corrections that need a
+person's sign-off, and a **Live Check** page to upload a fresh SI/BL pair and see a result
+immediately, outside the batch pipeline.
+
+**Resend is a browser action, not a backend send.** Unlike Auto Reply (below), clicking Resend
+never calls the API or the SMTP mailer. `gmailComposeUrl()` (`frontend/src/figma/App.tsx`) builds
+a `https://mail.google.com/mail/?view=cm&...` link pre-filled with the recipient, subject, and a
+draft body (the mismatched fields, or the pending-review draft Auto Reply already prepared), and
+`window.open()`s it in a new tab. Gmail's own compose window then sends from **whichever Google
+account is currently signed in to that browser** — there's no separate "resend account" to
+configure. The email is only marked as resent in the app once that tab opens; nothing confirms the
+employee actually hit Send on the Gmail side.
+
+### 2.6 Auto Reply and Gmail Receiver — optional, decoupled
+
+Two pieces sit outside the core pipeline on purpose, so neither can destabilize the classify →
+extract → compare → review path itself:
+
+- **Auto Reply** (`plugins/autoreply_plugin/`) runs *after* verification. On `OK` it drafts (and,
+  once enabled, sends) a confirmation; on `MISMATCH` it prepares a pending-review draft that an
+  employee has to approve before anything goes out. It never imports or calls into the
+  classifier, extractor, comparator, API, or frontend — it only consumes their output.
+- **Gmail Receiver** (`backend/gmail_receiver.py`) polls a real Gmail inbox over IMAP and feeds
+  new mail through the same pipeline the sample dataset uses, so the system can sit in front of a
+  live inbox as well as a static JSON dataset — the classification, extraction, and comparison
+  logic doesn't change based on where the email came from.
 
 ---
 
@@ -169,26 +258,23 @@ fields, compare, report) are covered above. Against the advanced challenges:
 
 ## 6. Repository structure
 
-```
-backend/
-  main.py             batch pipeline entry point (classify → extract → compare → score)
-  classifier.py        rule-based email classification + confidence
-  extractor.py          SI/BL field extraction (text/PDF/DOCX + label aliases)
-  comparator.py          field normalization + matching
-  ocr.py / ocr_checks.py  Tesseract fallback for scanned attachments
-  semantic_layer/        optional LLM fallback + human review queue
-  api.py                  FastAPI app backing the web app (live checks, sample inbox, search)
-  ui_records.py            shapes pipeline results for the UI (subjects, dates, fields)
-  export_ui_data.py         regenerates ui_data.json served by GET /api/emails
-  gmail_receiver.py          optional IMAP ingestion of a live inbox
-  autoreply_bridge.py         wires the standalone Auto Reply plugin into the API
-  server/                     scoring (score_cli.py, scoring.py) against the local answer key
-  inbox/, attachments/, data_v2/   the 520-email sample dataset + ground truth
-frontend/
-  src/figma/            the actual web app (App.tsx, api.ts) — Inbox, Verification, Documents,
-                         Manual Review, Resend, Live Check screens
-plugins/autoreply_plugin/  standalone post-verification Auto Reply plugin (safe-mode by default)
-```
+| Path | Role |
+|---|---|
+| `backend/main.py` | Batch pipeline entry point (classify → extract → compare → score) |
+| `backend/classifier.py` | Rule-based email classification + confidence |
+| `backend/extractor.py` | SI/BL field extraction (text/PDF/DOCX + label aliases) |
+| `backend/comparator.py` | Field normalization + matching |
+| `backend/ocr.py`, `backend/ocr_checks.py` | Tesseract fallback for scanned attachments |
+| `backend/semantic_layer/` | Optional LLM fallback + human review queue |
+| `backend/api.py` | FastAPI app backing the web app (live checks, sample inbox, search) |
+| `backend/ui_records.py` | Shapes pipeline results for the UI (subjects, dates, fields) |
+| `backend/export_ui_data.py` | Regenerates `ui_data.json` served by `GET /api/emails` |
+| `backend/gmail_receiver.py` | Optional IMAP ingestion of a live inbox |
+| `backend/autoreply_bridge.py` | Wires the standalone Auto Reply plugin into the API |
+| `backend/server/` | Scoring (`score_cli.py`, `scoring.py`) against the local answer key |
+| `backend/inbox/`, `backend/attachments/`, `backend/data_v2/` | The 520-email sample dataset + ground truth |
+| `frontend/src/figma/` | The actual web app (`App.tsx`, `api.ts`) — Inbox, Verification, Documents, Manual Review, Resend, Live Check screens |
+| `plugins/autoreply_plugin/` | Standalone post-verification Auto Reply plugin (safe-mode by default) |
 
 ---
 
