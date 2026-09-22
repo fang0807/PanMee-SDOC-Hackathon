@@ -188,8 +188,6 @@ frontend/
   src/figma/            the actual web app (App.tsx, api.ts) — Inbox, Verification, Documents,
                          Manual Review, Resend, Live Check screens
 plugins/autoreply_plugin/  standalone post-verification Auto Reply plugin (safe-mode by default)
-PROBLEM_BRIEF.md        the organiser's original problem statement (full text)
-DEPLOY.md, RUN_AND_SCORE.md, GMAIL_RECEIVER.md   step-by-step detail behind the sections below
 ```
 
 ---
@@ -229,8 +227,12 @@ $env:PYTHONIOENCODING = "utf-8"
 python main.py
 ```
 
-See [`RUN_AND_SCORE.md`](RUN_AND_SCORE.md) for the full troubleshooting table (encoding errors,
-missing `pypdf`/`openpyxl`, harmless PDF-parser warnings, etc.).
+| Symptom | Fix |
+|---|---|
+| `UnicodeEncodeError: 'charmap' codec ...` | Run `$env:PYTHONIOENCODING = "utf-8"` first |
+| `ModuleNotFoundError: pypdf` or `openpyxl` | Run `pip install pypdf openpyxl` |
+| `startxref` / `EOF marker not found` lines | Harmless warnings about malformed PDFs in the sample set; the run still finishes |
+| Score step fails: ground truth not found | Make sure `backend/data_v2/ground_truth.json` is present (`git pull`) |
 
 ---
 
@@ -253,8 +255,6 @@ Docker, set `ALLOWED_ORIGINS` to your frontend's deployed URL. Then confirm `/he
 time). Make sure `ALLOWED_ORIGINS` on the backend matches the Vercel URL exactly (no trailing
 slash) or the browser blocks the requests.
 
-Full walkthrough: [`DEPLOY.md`](DEPLOY.md).
-
 ---
 
 ## 9. Optional integrations
@@ -268,9 +268,12 @@ $env:GMAIL_RECEIVER_USERNAME="your_receiver@gmail.com"
 $env:GMAIL_RECEIVER_APP_PASSWORD="16-character App Password"
 ```
 
-Status at `GET /api/gmail-receiver/status`, force a poll with `POST /api/gmail-receiver/poll`.
-Full detail (BL-request subtypes, persistence across deploys, optional settings):
-[`GMAIL_RECEIVER.md`](GMAIL_RECEIVER.md).
+Status at `GET /api/gmail-receiver/status` reports `configured`, `running`, `lastImported`,
+`totalImported`, `lastError`, and `storedRecords`; force a poll with `POST
+/api/gmail-receiver/poll`. If the receiver is the same Gmail account already used by Auto Reply,
+you can omit the two credential variables above — it falls back to `AUTOREPLY_SMTP_USERNAME` /
+`AUTOREPLY_SMTP_PASSWORD`. Less common settings (`GMAIL_RECEIVER_FOLDER`, `_SEARCH`,
+`_MAX_PER_POLL`, `_MARK_SEEN`, `_IGNORE_SELF`, `_HOST`) default sensibly and rarely need changing.
 
 **Auto Reply** — safe-mode (preview only) by default. To send for real:
 
@@ -282,8 +285,14 @@ $env:AUTOREPLY_FROM_ADDRESS="your_account@gmail.com"
 ```
 
 `OK` sends automatically; `MISMATCH` drafts a reply under
-`plugins/autoreply_plugin/runtime/pending_review/` for an employee to approve first; `NEEDS_REVIEW`
-sends nothing. Full detail: [`plugins/autoreply_plugin/README.md`](plugins/autoreply_plugin/README.md).
+`plugins/autoreply_plugin/runtime/pending_review/` for an employee to approve, with
+`python -m plugins.autoreply_plugin.cli approve <email_id>`; `NEEDS_REVIEW` sends nothing. Test
+either path safely (no real email) with:
+
+```powershell
+python -m plugins.autoreply_plugin.cli process plugins\autoreply_plugin\example_match.json
+python -m plugins.autoreply_plugin.cli process plugins\autoreply_plugin\example_mismatch.json
+```
 
 **LLM fallback** (optional, off by default — the classifier and extractor work without it):
 
@@ -316,7 +325,7 @@ Our `submission.json` (one JSON object keyed by `email_id`, matching `sample_sub
 shape) is what gets POSTed to the organiser's self-evaluation endpoint via `inbox.submit(...)` or
 `POST /submit` when checking against their private reference set. Locally, the same shape is
 scored offline by `backend/server/score_cli.py` against `backend/data_v2/ground_truth.json` (see
-§3). Full field/category reference: [`PROBLEM_BRIEF.md`](PROBLEM_BRIEF.md).
+§3). The seven checked fields and five categories are listed in §1.
 
 ---
 
