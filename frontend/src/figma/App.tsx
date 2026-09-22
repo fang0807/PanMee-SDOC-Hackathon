@@ -594,19 +594,28 @@ function AmbientGradient() {
 
 // ─── Overview ─────────────────────────────────────────────────────────────────
 
-function OverviewScreen({ setScreen, setActiveNav, setVerifTab, verifiedEmails, manualDecisions, onSelectEmail, deletedEmails }: {
+function OverviewScreen({ setScreen, setActiveNav, setVerifTab, verifiedEmails, classifiedEmails, reclassifications, manualDecisions, onSelectEmail, deletedEmails }: {
   setScreen: (s: Screen) => void; setActiveNav: (n: NavItem) => void; setVerifTab: (t: VerifTab) => void
-  verifiedEmails: Set<string>; manualDecisions: Map<string, ManualDecision>; onSelectEmail: (id: string) => void
+  verifiedEmails: Set<string>; classifiedEmails: Set<string>
+  reclassifications: Map<string, { classification: Classification; classifyType?: string }>
+  manualDecisions: Map<string, ManualDecision>; onSelectEmail: (id: string) => void
   deletedEmails: Set<string>
 }) {
   const allEmails = useEmails()
   const visible = allEmails.filter(e => !deletedEmails.has(e.id))
+  const effClass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification }
   const verified = visible.filter(e => verifiedEmails.has(e.id))
   const matchCount    = verified.filter(e => effectiveResult(e, manualDecisions) === 'match').length
   const mismatchCount = verified.filter(e => effectiveResult(e, manualDecisions) === 'mismatch').length
-  const reviewCount   = verified.filter(e => effectiveResult(e, manualDecisions) === 'review').length
+  // Same set as the Review tab on the Verification screen: classification
+  // failures plus check-classified emails whose SI/BL comparison needs review.
+  // Kept in lockstep so the two counts never disagree (see App's classifyRev).
+  const reviewCount = visible.filter(e => classifiedEmails.has(e.id) && (
+    effClass(e).classification === 'need-review' ||
+    (effClass(e).classification === 'check' && effectiveResult(e, manualDecisions) === 'review')
+  )).length
   const resendCount   = verified.filter(e => manualDecisions.get(e.id) === 'resend').length
-  const total = verified.length
+  const total = verified.length + reviewCount
   const vPct = total ? (matchCount / total) * 100 : 0
   const rPct = total ? (reviewCount / total) * 100 : 0
   const mPct = total ? (mismatchCount / total) * 100 : 0
@@ -746,8 +755,15 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
   const [activeInboxTab, setActiveInboxTab] = useState<InboxTab>('new')
   const [othersCatFilter, setOthersCatFilter] = useState<OtherCatFilter>('all')
   const [inboxQuery, setInboxQuery] = useState('')
+  const [inboxDateFilter, setInboxDateFilter] = useState('')
 
-  React.useEffect(() => { setInboxQuery('') }, [activeInboxTab])
+  React.useEffect(() => { setInboxQuery(''); setInboxDateFilter('') }, [activeInboxTab])
+  const activeFilterLabel = [inboxQuery.trim() && `"${inboxQuery}"`, inboxDateFilter && formatFullDate(inboxDateFilter)].filter(Boolean).join(' · ')
+  function applyInboxFilters(list: Email[]): Email[] {
+    let out = inboxQuery.trim() ? list.filter(e => emailMatchesQuery(e, inboxQuery)) : list
+    if (inboxDateFilter) out = out.filter(e => e.receivedDate === inboxDateFilter)
+    return out
+  }
 
   const effClass = (e: Email) => reclassifications.get(e.id) ?? { classification: e.classification, classifyType: e.classifyType }
 
@@ -769,10 +785,10 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
   othersActive.forEach(e => { const cat = normalizeCat(effClass(e).classifyType); otherCatCounts[cat] = (otherCatCounts[cat] ?? 0) + 1 })
 
   const visibleOthers = othersCatFilter === 'all' ? othersActive : othersActive.filter(e => normalizeCat(effClass(e).classifyType) === othersCatFilter)
-  const shownNewIncoming = inboxQuery.trim() ? newIncoming.filter(e => emailMatchesQuery(e, inboxQuery)) : newIncoming
-  const shownBLComparison = inboxQuery.trim() ? blComparison.filter(e => emailMatchesQuery(e, inboxQuery)) : blComparison
-  const shownOthers = inboxQuery.trim() ? visibleOthers.filter(e => emailMatchesQuery(e, inboxQuery)) : visibleOthers
-  const shownReview = inboxQuery.trim() ? classifyRev.filter(e => emailMatchesQuery(e, inboxQuery)) : classifyRev
+  const shownNewIncoming = applyInboxFilters(newIncoming)
+  const shownBLComparison = applyInboxFilters(blComparison)
+  const shownOthers = applyInboxFilters(visibleOthers)
+  const shownReview = applyInboxFilters(classifyRev)
 
   const inboxTabs: { id: InboxTab; label: string; count: number; active: string }[] = [
     { id: 'new',    label: 'New Incoming',  count: newIncoming.length,  active: 'bg-[#EFF6FF] text-[#2563EB] border-[#BFDBFE]' },
@@ -799,13 +815,16 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
       </div>
 
       <div className="px-8 py-7 max-w-[900px]">
-        <div className="mb-5">
-          <SearchBar value={inboxQuery} onChange={setInboxQuery} placeholder={
-            activeInboxTab === 'new' ? 'Search new incoming emails...' :
-            activeInboxTab === 'bl' ? 'Search BL Comparison emails...' :
-            activeInboxTab === 'review' ? 'Search emails to review...' :
-            'Search other emails...'
-          } variant="section" />
+        <div className="mb-5 flex items-center gap-3">
+          <div className="flex-1">
+            <SearchBar value={inboxQuery} onChange={setInboxQuery} placeholder={
+              activeInboxTab === 'new' ? 'Search new incoming emails...' :
+              activeInboxTab === 'bl' ? 'Search BL Comparison emails...' :
+              activeInboxTab === 'review' ? 'Search emails to review...' :
+              'Search other emails...'
+            } variant="section" />
+          </div>
+          <DateFilterInput value={inboxDateFilter} onChange={setInboxDateFilter} />
         </div>
 
         {/* NEW INCOMING */}
@@ -822,7 +841,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
             {shownNewIncoming.length === 0
               ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4 flex items-center gap-3">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7l3.5 3.5 4.5-5" stroke="#16A34A" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                  <span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No new incoming emails found for \"${inboxQuery}\"` : 'No new incoming emails — all classified'}</span>
+                  <span className="text-[12.5px] text-[#9CA3AF]">{activeFilterLabel ? `No new incoming emails found for ${activeFilterLabel}` : 'No new incoming emails — all classified'}</span>
                 </div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
                   {shownNewIncoming.map((email, i) => (
@@ -859,7 +878,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
                 : null}
             />
             {shownBLComparison.length === 0
-              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No BL Comparison emails found for \"${inboxQuery}\"` : 'No BL Comparison emails awaiting verification'}</span></div>
+              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{activeFilterLabel ? `No BL Comparison emails found for ${activeFilterLabel}` : 'No BL Comparison emails awaiting verification'}</span></div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
                   {shownBLComparison.map((email, i) => (
                     <div key={email.id} className={`email-row-micro flex items-center gap-4 px-5 py-4 ${i < shownBLComparison.length - 1 ? 'border-b border-[#F0EEE9]' : ''}`}>
@@ -894,7 +913,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
             {othersActive.length === 0
               ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No emails in Others queue</span></div>
               : shownOthers.length === 0
-                ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No ${othersCatFilter === 'all' ? '' : othersCatFilter + ' '}emails found for \"${inboxQuery}\"` : `No ${othersCatFilter} emails`}</span></div>
+                ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{activeFilterLabel ? `No ${othersCatFilter === 'all' ? '' : othersCatFilter + ' '}emails found for ${activeFilterLabel}` : `No ${othersCatFilter} emails`}</span></div>
                 : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
                     {shownOthers.map((email, i) => (
                       <button key={email.id} onClick={() => { onSelectOthers(email.id); setScreen('others-detail') }}
@@ -922,7 +941,7 @@ function InboxScreen({ classifiedEmails, verifiedEmails, readEmails, reclassific
           <section>
             <SectionHdr label="Review" count={classifyRev.length} />
             {shownReview.length === 0
-              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{inboxQuery.trim() ? `No review emails found for \"${inboxQuery}\"` : 'No emails requiring review'}</span></div>
+              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{activeFilterLabel ? `No review emails found for ${activeFilterLabel}` : 'No emails requiring review'}</span></div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
                   {shownReview.map((email, i) => (
                     <button key={email.id} onClick={() => { onSelectReview(email.id); setScreen('manual-review') }}
@@ -1111,6 +1130,19 @@ function SearchBar({ value, onChange, placeholder, variant = 'section' }: {
 function emailMatchesQuery(email: Email, q: string): boolean {
   const lq = q.toLowerCase()
   return email.subject.toLowerCase().includes(lq) || email.senderName.toLowerCase().includes(lq) || email.sender.toLowerCase().includes(lq) || email.id.toLowerCase().includes(lq) || (email.docType ?? '').toLowerCase().includes(lq) || email.received.toLowerCase().includes(lq)
+}
+
+// A calendar-picker filter for a search bar, matching against Email.receivedDate.
+function DateFilterInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="flex items-center gap-1.5 flex-shrink-0">
+      <input type="date" value={value} onChange={e => onChange(e.target.value)}
+        className="text-[12px] text-[#374151] border border-[#E8E6E1] rounded-lg px-2.5 py-2 bg-white hover:bg-[#F9F8F6] transition-colors" />
+      {value && (
+        <button onClick={() => onChange('')} className="btn-micro text-[12px] text-[#6B7280] hover:text-[#374151] px-1.5">Clear</button>
+      )}
+    </div>
+  )
 }
 
 // ─── Verification ─────────────────────────────────────────────────────────────
@@ -2100,8 +2132,11 @@ function ResendScreen({ manualDecisions, resentEmails, deletedEmails, setScreen,
 }) {
   const allEmails = useEmails()
   const [query, setQuery] = useState('')
+  const [dateFilter, setDateFilter] = useState('')
   const resendEmails = allEmails.filter(e => manualDecisions.get(e.id) === 'resend' && !resentEmails.has(e.id) && !deletedEmails.has(e.id))
-  const listEmails = query.trim() ? resendEmails.filter(e => emailMatchesQuery(e, query)) : resendEmails
+  const activeFilterLabel = [query.trim() && `"${query}"`, dateFilter && formatFullDate(dateFilter)].filter(Boolean).join(' · ')
+  let listEmails = query.trim() ? resendEmails.filter(e => emailMatchesQuery(e, query)) : resendEmails
+  if (dateFilter) listEmails = listEmails.filter(e => e.receivedDate === dateFilter)
 
   return (
     <div className="page-ambient flex-1 overflow-y-auto">
@@ -2113,8 +2148,9 @@ function ResendScreen({ manualDecisions, resentEmails, deletedEmails, setScreen,
           <div className="text-[13px] text-[#6B7280]">{resendEmails.length === 0 ? 'No emails in the resend queue' : `email${resendEmails.length > 1 ? 's' : ''} manually reviewed and marked for correction`}</div>
         </div>
         {resendEmails.length > 0 && (
-          <div className="mb-5">
-            <SearchBar value={query} onChange={setQuery} placeholder="Search emails, shipment ID, sender..." variant="global" />
+          <div className="mb-5 flex items-center gap-3">
+            <div className="flex-1"><SearchBar value={query} onChange={setQuery} placeholder="Search emails, shipment ID, sender..." variant="global" /></div>
+            <DateFilterInput value={dateFilter} onChange={setDateFilter} />
           </div>
         )}
         {resendEmails.length === 0
@@ -2126,7 +2162,7 @@ function ResendScreen({ manualDecisions, resentEmails, deletedEmails, setScreen,
               <div className="text-[13px] text-[#9CA3AF]">Emails marked for resend after manual review will appear here.</div>
             </div>
           : listEmails.length === 0
-            ? <div className="bg-white border border-[#E8E6E1] rounded-xl p-12 text-center text-[13px] text-[#9CA3AF]">No emails found for "{query}"</div>
+            ? <div className="bg-white border border-[#E8E6E1] rounded-xl p-12 text-center text-[13px] text-[#9CA3AF]">No emails found for {activeFilterLabel}</div>
             : <div className="space-y-4">
                 {listEmails.map(email => {
                   const pf = email.fields.find(f => f.result !== 'match')
@@ -2484,8 +2520,10 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
   const [otherDocFilter, setOtherDocFilter] = useState<OtherCatFilter>('all')
   const [docSection, setDocSection] = useState<'bl' | 'other'>('bl')
   const [documentQuery, setDocumentQuery] = useState('')
+  const [documentDateFilter, setDocumentDateFilter] = useState('')
 
-  React.useEffect(() => { setDocumentQuery('') }, [docSection])
+  React.useEffect(() => { setDocumentQuery(''); setDocumentDateFilter('') }, [docSection])
+  const activeDocFilterLabel = [documentQuery.trim() && `"${documentQuery}"`, documentDateFilter && formatFullDate(documentDateFilter)].filter(Boolean).join(' · ')
 
   React.useEffect(() => { if (!deleteMode) setSelectedForDelete(new Set()) }, [deleteMode])
 
@@ -2534,8 +2572,13 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
     ? otherSection
     : otherSection.filter(e => classifiedEmails.has(e.id) && effClass(e).classification === 'ignore' && normalizeCat(effClass(e).classifyType) === otherDocFilter)
 
-  const shownBLSection = documentQuery.trim() ? blSection.filter(e => emailMatchesQuery(e, documentQuery)) : blSection
-  const shownOtherSection = documentQuery.trim() ? visibleOtherSection.filter(e => emailMatchesQuery(e, documentQuery)) : visibleOtherSection
+  function applyDocFilters(list: Email[]): Email[] {
+    let out = documentQuery.trim() ? list.filter(e => emailMatchesQuery(e, documentQuery)) : list
+    if (documentDateFilter) out = out.filter(e => e.receivedDate === documentDateFilter)
+    return out
+  }
+  const shownBLSection = applyDocFilters(blSection)
+  const shownOtherSection = applyDocFilters(visibleOtherSection)
 
   function getBLStatus(e: Email): { label: string; badge: string; dot: string } {
     if (!verifiedEmails.has(e.id) && !classifiedEmails.has(e.id)) return { label: 'New', badge: 'bg-[#EFF6FF] text-[#2563EB]', dot: 'bg-[#2563EB]' }
@@ -2663,17 +2706,20 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
           })}
         </div>
 
-        <div className="mb-5">
-          <SearchBar value={documentQuery} onChange={setDocumentQuery}
-            placeholder={docSection === 'bl' ? 'Search BL Comparison documents...' : 'Search other documents...'}
-            variant="section" />
+        <div className="mb-5 flex items-center gap-3">
+          <div className="flex-1">
+            <SearchBar value={documentQuery} onChange={setDocumentQuery}
+              placeholder={docSection === 'bl' ? 'Search BL Comparison documents...' : 'Search other documents...'}
+              variant="section" />
+          </div>
+          <DateFilterInput value={documentDateFilter} onChange={setDocumentDateFilter} />
         </div>
 
         {/* Section 1: BL Comparison */}
         {docSection === 'bl' && <section>
           <SectionHdr label="BL Comparison" count={blSection.length} />
           {shownBLSection.length === 0
-            ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{documentQuery.trim() ? `No BL Comparison documents found for \"${documentQuery}\"` : 'No BL Comparison documents'}</span></div>
+            ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{activeDocFilterLabel ? `No BL Comparison documents found for ${activeDocFilterLabel}` : 'No BL Comparison documents'}</span></div>
             : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
                 {shownBLSection.map((email, i) => {
                   const status = getBLStatus(email)
@@ -2716,7 +2762,7 @@ function DocumentsScreen({ classifiedEmails, verifiedEmails, readEmails, reclass
           {otherSection.length === 0
             ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">No other documents</span></div>
             : shownOtherSection.length === 0
-              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{documentQuery.trim() ? `No ${otherDocFilter === 'all' ? '' : otherDocFilter + ' '}documents found for \"${documentQuery}\"` : `No ${otherDocFilter} emails`}</span></div>
+              ? <div className="bg-white border border-[#E8E6E1] rounded-xl px-5 py-4"><span className="text-[12.5px] text-[#9CA3AF]">{activeDocFilterLabel ? `No ${otherDocFilter === 'all' ? '' : otherDocFilter + ' '}documents found for ${activeDocFilterLabel}` : `No ${otherDocFilter} emails`}</span></div>
               : <div className="bg-white border border-[#E8E6E1] rounded-xl overflow-hidden">
                   {shownOtherSection.map((email, i) => {
                     const status = getOtherStatus(email)
@@ -2953,7 +2999,8 @@ function Workspace({ initialEmails }: { initialEmails: Email[] }) {
       <main className="flex-1 flex flex-col overflow-hidden">
         {screen === 'overview' && (
           <OverviewScreen setScreen={handleSetScreen} setActiveNav={setActiveNav} setVerifTab={setVerifTab}
-            verifiedEmails={verifiedEmails} manualDecisions={manualDecisions} onSelectEmail={setSelectedEmailId}
+            verifiedEmails={verifiedEmails} classifiedEmails={classifiedEmails} reclassifications={reclassifications}
+            manualDecisions={manualDecisions} onSelectEmail={setSelectedEmailId}
             deletedEmails={deletedEmails} />
         )}
         {screen === 'inbox' && (
